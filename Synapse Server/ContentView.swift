@@ -8,7 +8,7 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Liquid Glass Design System
+// MARK: - Liquid Glass Design System (macOS 26+ native, macOS 14 fallback)
 
 struct GlassCard<Content: View>: View {
     let cornerRadius: CGFloat
@@ -18,30 +18,42 @@ struct GlassCard<Content: View>: View {
         self.content = content()
     }
     var body: some View {
-        content
-            .background(
-                ZStack {
-                    VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
-                    LinearGradient(colors: [.white.opacity(0.12), .white.opacity(0.03), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(
-                        LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.08), .white.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 0.7
-                    )
-            )
-            .shadow(color: .black.opacity(0.18), radius: 16, x: 0, y: 8)
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            content
+                .background(
+                    ZStack {
+                        VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
+                        LinearGradient(colors: [.white.opacity(0.12), .white.opacity(0.03), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(
+                            LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.08), .white.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                            lineWidth: 0.7
+                        )
+                )
+                .shadow(color: .black.opacity(0.18), radius: 16, x: 0, y: 8)
+        }
     }
 }
 
 struct GlassBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         ZStack {
             VisualEffectView(material: .fullScreenUI, blendingMode: .behindWindow)
-            LinearGradient(colors: [Color(white: 0.12), Color(white: 0.08)], startPoint: .top, endPoint: .bottom).opacity(0.5)
+            if #unavailable(macOS 26.0) {
+                let topColor = colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.96)
+                let bottomColor = colorScheme == .dark ? Color(white: 0.08) : Color(white: 0.92)
+                LinearGradient(colors: [topColor, bottomColor], startPoint: .top, endPoint: .bottom)
+                    .opacity(colorScheme == .dark ? 0.5 : 0.3)
+            }
         }.ignoresSafeArea()
     }
 }
@@ -122,14 +134,7 @@ struct SidebarView: View {
                         .padding(.vertical, 10)
                     }
                     .buttonStyle(.plain)
-                    .background(
-                        ZStack {
-                            VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
-                            Color.red.opacity(0.1)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    )
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.red.opacity(0.3), lineWidth: 0.6))
+                    .modifier(GlassTintedBackground(cornerRadius: 10, tint: .red))
                     .foregroundStyle(.red)
                     .padding(20)
                 }
@@ -143,6 +148,12 @@ struct SidebarView: View {
 struct DashboardView: View {
     @ObservedObject var viewModel: SynapseViewModel
     @Binding var selection: SidebarSelection
+    
+    enum DisconnectedTab: String, CaseIterable {
+        case pairing = "Eşleşme"
+        case settings = "Ayarlar"
+    }
+    @State private var disconnectedTab: DisconnectedTab = .pairing
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -150,26 +161,10 @@ struct DashboardView: View {
 
             VStack(spacing: 0) {
                 if viewModel.connectionStatus == .connected {
-                    // Liquid Glass Tab Bar
+                    // Tab Bar
                     VStack(spacing: 14) {
-                        HStack(spacing: 4) {
-                            ForEach(SidebarSelection.allCases, id: \.self) { item in
-                                GlassTabButton(item: item, isSelected: selection == item) {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selection = item }
-                                }
-                            }
-                        }
-                        .padding(5)
-                        .background(
-                            ZStack {
-                                VisualEffectView(material: .fullScreenUI, blendingMode: .withinWindow)
-                                    .clipShape(Capsule())
-                                Capsule().fill(LinearGradient(colors: [.white.opacity(0.12), .white.opacity(0.03), .cyan.opacity(0.04)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                Capsule().stroke(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.08), .white.opacity(0.25)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.7)
-                            }
-                        )
-                        .shadow(color: .black.opacity(0.15), radius: 15, x: 0, y: 8)
-                        .padding(.top, 24)
+                        tabBarContent
+                            .padding(.top, 24)
 
                         HStack {
                             Text(selection.rawValue)
@@ -184,7 +179,21 @@ struct DashboardView: View {
                 ScrollView {
                     VStack(spacing: 24) {
                         if viewModel.connectionStatus != .connected {
-                            PairingCard(viewModel: viewModel).padding(.top, 50)
+                            // Disconnected State Tabs
+                            Picker("", selection: $disconnectedTab) {
+                                ForEach(DisconnectedTab.allCases, id: \.self) { tab in
+                                    Text(tab.rawValue).tag(tab)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 300)
+                            .padding(.top, 40)
+                            
+                            if disconnectedTab == .pairing {
+                                PairingCard(viewModel: viewModel).padding(.top, 10)
+                            } else {
+                                SettingsCard().padding(.top, 10)
+                            }
                         } else {
                             VStack(spacing: 0) {
                                 switch selection {
@@ -193,12 +202,46 @@ struct DashboardView: View {
                                 case .messages: MessagesView(viewModel: viewModel)
                                 case .notifications: NotificationsView(viewModel: viewModel)
                                 case .mirroring: ScreenMirroringView(viewModel: viewModel)
+                                case .photos: PhotoLibraryView(viewModel: viewModel)
                                 }
                             }.padding(.top, 10)
                         }
                     }.padding(.bottom, 32)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var tabBarContent: some View {
+        if #available(macOS 26.0, *) {
+            HStack(spacing: 4) {
+                ForEach(SidebarSelection.allCases, id: \.self) { item in
+                    GlassTabButton(item: item, isSelected: selection == item) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selection = item }
+                    }
+                }
+            }
+            .padding(5)
+            .glassEffect(.regular, in: .capsule)
+        } else {
+            HStack(spacing: 4) {
+                ForEach(SidebarSelection.allCases, id: \.self) { item in
+                    GlassTabButton(item: item, isSelected: selection == item) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selection = item }
+                    }
+                }
+            }
+            .padding(5)
+            .background(
+                ZStack {
+                    VisualEffectView(material: .fullScreenUI, blendingMode: .withinWindow)
+                        .clipShape(Capsule())
+                    Capsule().fill(LinearGradient(colors: [.white.opacity(0.12), .white.opacity(0.03), .cyan.opacity(0.04)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    Capsule().stroke(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.08), .white.opacity(0.25)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.7)
+                }
+            )
+            .shadow(color: .black.opacity(0.15), radius: 15, x: 0, y: 8)
         }
     }
 }
@@ -217,22 +260,28 @@ struct GlassTabButton: View {
                 Text(item.rawValue).font(.system(size: 11, weight: .semibold))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(
-                Group {
-                    if isSelected {
-                        ZStack {
-                            Capsule().fill(Color.accentColor.opacity(0.15))
-                            Capsule().fill(LinearGradient(colors: [.white.opacity(0.15), .clear], startPoint: .top, endPoint: .bottom))
-                            Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
-                        }
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
-            )
+            .background(selectedBackground)
             .foregroundStyle(isSelected ? Color.accentColor : .primary.opacity(0.6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var selectedBackground: some View {
+        if #available(macOS 26.0, *) {
+            Capsule().fill(Color.accentColor.opacity(0.18))
+                .opacity(isSelected ? 1 : 0)
+                .scaleEffect(isSelected ? 1.0 : 0.85)
+        } else {
+            ZStack {
+                Capsule().fill(Color.accentColor.opacity(0.15))
+                Capsule().fill(LinearGradient(colors: [.white.opacity(0.15), .clear], startPoint: .top, endPoint: .bottom))
+                Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
+            }
+            .opacity(isSelected ? 1 : 0)
+            .scaleEffect(isSelected ? 1.0 : 0.85)
+        }
     }
 }
 
@@ -347,14 +396,14 @@ struct PairingCard: View {
                             .tracking(8)
                     }
 
-                    GlassCard(cornerRadius: 10) {
-                        VStack(spacing: 4) {
-                            Text("Yerel IP Adresi").font(.caption2).foregroundStyle(.secondary)
-                            Text(viewModel.getIPAddress())
-                                .font(.system(.callout, design: .monospaced))
-                                .foregroundStyle(.cyan)
-                        }.padding(10)
+                    VStack(spacing: 4) {
+                        Text("Yerel IP Adresi").font(.caption2).foregroundStyle(.secondary)
+                        Text(viewModel.getIPAddress())
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(.cyan)
                     }
+                    .padding(10)
+                    .modifier(GlassRowBackground(cornerRadius: 10))
                 }
             }
             .padding(32).frame(maxWidth: .infinity)
@@ -545,7 +594,14 @@ struct ClipboardSyncCard: View {
     var body: some View {
         GlassCard(cornerRadius: 16) {
             VStack(alignment: .leading, spacing: 14) {
-                Label("Pano Senkronizasyonu", systemImage: "doc.on.clipboard").font(.headline)
+                HStack {
+                    Label("Pano Senkronizasyonu", systemImage: "doc.on.clipboard").font(.headline)
+                    Spacer()
+                    Toggle("", isOn: $viewModel.isClipboardSyncEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(.cyan)
+                }
 
                 if !viewModel.lastSentClipboard.isEmpty {
                     ClipboardItemView(direction: "Gönderilen", content: viewModel.lastSentClipboard, icon: "arrow.up.circle.fill", color: .green)
@@ -575,8 +631,7 @@ struct ClipboardItemView: View {
             }
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 0.5))
+        .modifier(GlassRowBackground(cornerRadius: 10))
     }
 }
 
@@ -588,8 +643,57 @@ struct GlassListRow<Content: View>: View {
     var body: some View {
         content
             .padding(10)
-            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 0.4))
+            .modifier(GlassRowBackground(cornerRadius: 10))
+    }
+}
+
+// MARK: - Backward-Compatible Glass Modifiers
+
+struct GlassRowBackground: ViewModifier {
+    let cornerRadius: CGFloat
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            content
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 0.4))
+        }
+    }
+}
+
+struct GlassTintedBackground: ViewModifier {
+    let cornerRadius: CGFloat
+    let tint: Color
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+                .tint(tint)
+        } else {
+            content
+                .background(
+                    ZStack {
+                        VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
+                        tint.opacity(0.1)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                )
+                .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).stroke(tint.opacity(0.3), lineWidth: 0.6))
+        }
+    }
+}
+
+struct GlassNavBarBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .capsule)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Capsule())
+        }
     }
 }
 
@@ -665,7 +769,6 @@ struct PairingProgressOverlay: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.4).ignoresSafeArea()
-            VisualEffectView(material: .hudWindow, blendingMode: .withinWindow).ignoresSafeArea()
 
             VStack(spacing: 20) {
                 ProgressView()
@@ -674,9 +777,21 @@ struct PairingProgressOverlay: View {
                     .font(.headline).foregroundStyle(.secondary)
             }
             .padding(40)
-            .background(VisualEffectView(material: .popover, blendingMode: .withinWindow))
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .shadow(radius: 20)
+            .modifier(GlassOverlayBackground())
+        }
+    }
+}
+
+struct GlassOverlayBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .rect(cornerRadius: 20))
+        } else {
+            content
+                .background(VisualEffectView(material: .popover, blendingMode: .withinWindow))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .shadow(radius: 20)
         }
     }
 }
@@ -688,6 +803,7 @@ enum SidebarSelection: String, CaseIterable {
     case calls = "Çağrılar"
     case messages = "Mesajlar"
     case notifications = "Bildirimler"
+    case photos = "Fotoğraflar"
     case mirroring = "Ekran"
 
     var icon: String {
@@ -696,6 +812,7 @@ enum SidebarSelection: String, CaseIterable {
         case .calls: return "phone.fill"
         case .messages: return "message.fill"
         case .notifications: return "bell.fill"
+        case .photos: return "photo.on.rectangle.angled"
         case .mirroring: return "macwindow"
         }
     }
@@ -772,7 +889,5 @@ struct QRCodeView: View {
         return nil
     }
 }
-
-#Preview { ContentView() }
 
 #Preview { ContentView() }

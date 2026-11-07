@@ -6,11 +6,47 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C9D264WIDGET100 /* SynapseWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C9D264WIDGET003 /* SynapseWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C9D264WIDGET009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C9D2645E2F9019ED00EED142 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C9D264WIDGET001;
+			remoteInfo = SynapseWidget;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C9D264WIDGET110 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C9D264WIDGET100 /* SynapseWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		C9D264662F9019ED00EED142 /* Synapse Server.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Synapse Server.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C9D264WIDGET003 /* SynapseWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SynapseWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C9465AEC2FE5A8AF006FC424 /* Exceptions for "SynapseWidget" folder in "SynapseWidget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C9D264WIDGET001 /* SynapseWidget */;
+		};
 		C9D264932F9027B700EED142 /* Exceptions for "Synapse Server" folder in "Synapse Server" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -29,10 +65,25 @@
 			path = "Synapse Server";
 			sourceTree = "<group>";
 		};
+		C9D264WIDGET002 /* SynapseWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C9465AEC2FE5A8AF006FC424 /* Exceptions for "SynapseWidget" folder in "SynapseWidget" target */,
+			);
+			path = SynapseWidget;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		C9D264632F9019ED00EED142 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9D264WIDGET102 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -45,6 +96,7 @@
 		C9D2645D2F9019ED00EED142 = {
 			isa = PBXGroup;
 			children = (
+				C9D264WIDGET002 /* SynapseWidget */,
 				C9D264682F9019ED00EED142 /* Synapse Server */,
 				C9D264672F9019ED00EED142 /* Products */,
 			);
@@ -54,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				C9D264662F9019ED00EED142 /* Synapse Server.app */,
+				C9D264WIDGET003 /* SynapseWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -68,10 +121,12 @@
 				C9D264622F9019ED00EED142 /* Sources */,
 				C9D264632F9019ED00EED142 /* Frameworks */,
 				C9D264642F9019ED00EED142 /* Resources */,
+				C9D264WIDGET110 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C9D264WIDGET008 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				C9D264682F9019ED00EED142 /* Synapse Server */,
@@ -83,6 +138,26 @@
 			productReference = C9D264662F9019ED00EED142 /* Synapse Server.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C9D264WIDGET001 /* SynapseWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C9D264WIDGET004 /* Build configuration list for PBXNativeTarget "SynapseWidget" */;
+			buildPhases = (
+				C9D264WIDGET101 /* Sources */,
+				C9D264WIDGET102 /* Frameworks */,
+				C9D264WIDGET103 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C9D264WIDGET002 /* SynapseWidget */,
+			);
+			name = SynapseWidget;
+			productName = SynapseWidget;
+			productReference = C9D264WIDGET003 /* SynapseWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -91,9 +166,12 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2640;
-				LastUpgradeCheck = 2640;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					C9D264652F9019ED00EED142 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+					C9D264WIDGET001 = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
@@ -113,12 +191,20 @@
 			projectRoot = "";
 			targets = (
 				C9D264652F9019ED00EED142 /* Synapse Server */,
+				C9D264WIDGET001 /* SynapseWidget */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		C9D264642F9019ED00EED142 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C9D264WIDGET103 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -135,7 +221,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C9D264WIDGET101 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C9D264WIDGET008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C9D264WIDGET001 /* SynapseWidget */;
+			targetProxy = C9D264WIDGET009 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		C9D2646F2F9019EE00EED142 /* Debug */ = {
@@ -172,6 +273,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 869J7J87RL;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -197,6 +299,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -236,6 +339,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 869J7J87RL;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -254,6 +358,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -263,9 +368,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Synapse Server/Synapse_Server.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 869J7J87RL;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -288,6 +395,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.serkantkn.Synapse-Server";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -306,9 +414,11 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Synapse Server/Synapse_Server.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 869J7J87RL;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -331,6 +441,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.serkantkn.Synapse-Server";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -341,6 +452,66 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C9D264WIDGET005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = SynapseWidget/SynapseWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 869J7J87RL;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SynapseWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SynapseWidget;
+				INFOPLIST_KEY_NSExtensionPointIdentifier = "com.apple.widgetkit-extension";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.serkantkn.Synapse-Server.SynapseWidget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C9D264WIDGET006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = SynapseWidget/SynapseWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 869J7J87RL;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SynapseWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SynapseWidget;
+				INFOPLIST_KEY_NSExtensionPointIdentifier = "com.apple.widgetkit-extension";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.serkantkn.Synapse-Server.SynapseWidget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -361,6 +532,15 @@
 			buildConfigurations = (
 				C9D264722F9019EE00EED142 /* Debug */,
 				C9D264732F9019EE00EED142 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C9D264WIDGET004 /* Build configuration list for PBXNativeTarget "SynapseWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9D264WIDGET005 /* Debug */,
+				C9D264WIDGET006 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

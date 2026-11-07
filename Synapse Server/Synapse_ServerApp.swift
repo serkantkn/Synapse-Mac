@@ -6,6 +6,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 @main
 struct Synapse_ServerApp: App {
@@ -13,14 +14,14 @@ struct Synapse_ServerApp: App {
     @ObservedObject var viewModel = SynapseViewModel.shared
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("Synapse", id: "main") {
             ContentView()
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
 
-        WindowGroup(id: "mirroring") {
+        Window("Ekran Yansıtma", id: "mirroring") {
             MirroringStandaloneView(viewModel: viewModel)
         }
         .windowStyle(.hiddenTitleBar)
@@ -50,6 +51,7 @@ struct Synapse_ServerApp: App {
 struct StatusMenuView: View {
     @ObservedObject var viewModel: SynapseViewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
     @State private var showQuitAlert = false
 
     var body: some View {
@@ -122,8 +124,10 @@ struct StatusMenuView: View {
             // Actions
             HStack(spacing: 12) {
                 Button(action: {
+                    NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "main")
+                    dismiss()
                 }) {
                     Label("Paneli Aç", systemImage: "macwindow")
                         .frame(maxWidth: .infinity)
@@ -146,8 +150,7 @@ struct StatusMenuView: View {
                     Image(systemName: "power")
                         .foregroundStyle(.red)
                         .padding(10)
-                        .background(Color.red.opacity(0.1))
-                        .cornerRadius(10)
+                        .modifier(GlassTintedBackground(cornerRadius: 10, tint: .red))
                 }
                 .buttonStyle(.plain)
             }
@@ -163,7 +166,13 @@ struct StatItem: View {
     var body: some View {
         VStack(spacing: 4) {
             ZStack {
-                Circle().fill(color.opacity(0.1)).frame(width: 40, height: 40)
+                if #available(macOS 26.0, *) {
+                    Circle().fill(.clear).frame(width: 40, height: 40)
+                        .glassEffect(.regular, in: .circle)
+                        .tint(color)
+                } else {
+                    Circle().fill(color.opacity(0.1)).frame(width: 40, height: 40)
+                }
                 Image(systemName: icon).foregroundStyle(color)
             }
             Text("\(count)").font(.system(size: 16, weight: .bold))
@@ -173,6 +182,49 @@ struct StatItem: View {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tekilleştirme (Single Instance) Kontrolü
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            if runningApps.count > 1 {
+                // Diğer çalışan kopyayı bul
+                if let existingApp = runningApps.first(where: { $0 != NSRunningApplication.current }) {
+                    if #available(macOS 14.0, *) {
+                        existingApp.activate()
+                    } else {
+                        existingApp.activate(options: [.activateAllWindows])
+                    }
+                }
+                // Bu yeni kopyayı derhal sonlandır
+                NSApp.terminate(nil)
+                return
+            }
+        }
+        
+        updateActivationPolicy()
+        
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.updateActivationPolicy()
+        }
+        
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.updateActivationPolicy()
+            }
+        }
+    }
+
+    private func updateActivationPolicy() {
+        let hasVisibleWindows = NSApp.windows.contains { $0.isVisible && $0.className != "NSStatusBarWindow" }
+        let currentPolicy = NSApp.activationPolicy()
+        
+        if hasVisibleWindows && currentPolicy != .regular {
+            NSApp.setActivationPolicy(.regular)
+        } else if !hasVisibleWindows && currentPolicy != .accessory {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { return false }
 }
 
@@ -211,6 +263,8 @@ struct VisualEffectView: NSViewRepresentable {
 struct MirroringStandaloneView: View {
     @ObservedObject var viewModel: SynapseViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var keyMonitor: Any? = nil
+    @State private var showAccessibilityWarning = true
 
     var body: some View {
         ZStack {
@@ -224,7 +278,7 @@ struct MirroringStandaloneView: View {
                         Text(viewModel.connectedDeviceName ?? "Cihaz").font(.system(size: 11, weight: .bold))
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .modifier(GlassNavBarBackground())
                     
                     Spacer()
                     
@@ -251,8 +305,34 @@ struct MirroringStandaloneView: View {
                             .gesture(
                                 DragGesture(minimumDistance: 0)
                                     .onEnded { value in
-                                        let x = Double(value.startLocation.x / geo.size.width)
-                                        let y = Double(value.startLocation.y / geo.size.height)
+                                        let imageWidth = frame.size.width
+                                        let imageHeight = frame.size.height
+                                        
+                                        guard imageWidth > 0 && imageHeight > 0 else { return }
+                                        
+                                        let imageRatio = imageWidth / imageHeight
+                                        let containerRatio = geo.size.width / geo.size.height
+                                        
+                                        var fittedWidth = geo.size.width
+                                        var fittedHeight = geo.size.height
+                                        var offsetX: CGFloat = 0
+                                        var offsetY: CGFloat = 0
+                                        
+                                        if imageRatio > containerRatio {
+                                            fittedWidth = geo.size.width
+                                            fittedHeight = geo.size.width / imageRatio
+                                            offsetY = (geo.size.height - fittedHeight) / 2
+                                        } else {
+                                            fittedWidth = geo.size.height * imageRatio
+                                            fittedHeight = geo.size.height
+                                            offsetX = (geo.size.width - fittedWidth) / 2
+                                        }
+                                        
+                                        let relativeX = (value.startLocation.x - offsetX) / fittedWidth
+                                        let relativeY = (value.startLocation.y - offsetY) / fittedHeight
+                                        
+                                        let x = max(0.0, min(1.0, Double(relativeX)))
+                                        let y = max(0.0, min(1.0, Double(relativeY)))
                                         
                                         if abs(value.translation.width) < 5 && abs(value.translation.height) < 5 {
                                             viewModel.sendRemoteInput(x: x, y: y, action: "CLICK")
@@ -267,6 +347,17 @@ struct MirroringStandaloneView: View {
                             )
                     }
                     .transition(.opacity)
+                    .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                        guard let provider = providers.first else { return false }
+                        let _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                            if let url = url {
+                                Task { @MainActor in
+                                    viewModel.sendFile(url: url)
+                                }
+                            }
+                        }
+                        return true
+                    }
                 } else {
                     VStack(spacing: 20) {
                         ProgressView()
@@ -277,23 +368,46 @@ struct MirroringStandaloneView: View {
                 }
 
                 if viewModel.isMirroring {
-                    HStack(spacing: 40) {
-                        Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "RECENTS") }) {
-                            Image(systemName: "square.fill").font(.system(size: 16))
-                        }.buttonStyle(.plain)
+                    VStack(spacing: 10) {
+                        HStack(spacing: 40) {
+                            Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "RECENTS") }) {
+                                Image(systemName: "square.fill").font(.system(size: 16))
+                            }.buttonStyle(.plain)
+                            
+                            Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "HOME") }) {
+                                Image(systemName: "circle.fill").font(.system(size: 20))
+                            }.buttonStyle(.plain)
+                            
+                            Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "BACK") }) {
+                                Image(systemName: "triangle.fill").font(.system(size: 16)).rotationEffect(.degrees(-90))
+                            }.buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 32)
+                        .modifier(GlassNavBarBackground())
                         
-                        Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "HOME") }) {
-                            Image(systemName: "circle.fill").font(.system(size: 20))
-                        }.buttonStyle(.plain)
-                        
-                        Button(action: { viewModel.sendRemoteInput(x: 0, y: 0, action: "BACK") }) {
-                            Image(systemName: "triangle.fill").font(.system(size: 16)).rotationEffect(.degrees(-90))
-                        }.buttonStyle(.plain)
+                        if showAccessibilityWarning && !viewModel.isRemoteAccessibilityEnabled {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.yellow)
+                                Text("Kontrollerin çalışması için telefonda 'Synapse' Erişilebilirlik Servisi etkin olmalıdır.")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.9))
+                                
+                                Button(action: { showAccessibilityWarning = false }) {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.white.opacity(0.6))
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.leading, 4)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .modifier(GlassTintedBackground(cornerRadius: 8, tint: .yellow))
+                            .padding(.bottom, 12)
+                        }
                     }
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 32)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 20)
                 }
             }
         }
@@ -302,11 +416,38 @@ struct MirroringStandaloneView: View {
             RoundedRectangle(cornerRadius: 0)
                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
         )
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // Allow Cmd keyboard combinations to pass through (e.g. Cmd+W, Cmd+Q)
+                if event.modifierFlags.contains(.command) {
+                    return event
+                }
+                handleKeyEvent(event)
+                return nil // Prevent system alert sound/beep
+            }
+        }
         .onDisappear {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
             // Stop mirroring process when the window is closed
             if viewModel.isMirroring {
                 viewModel.toggleScreenMirroring()
             }
+        }
+    }
+
+
+    private func handleKeyEvent(_ event: NSEvent) {
+        if event.keyCode == 51 { // Delete / Backspace
+            viewModel.sendKeyboardInput(key: "BACKSPACE", type: "SPECIAL")
+        } else if event.keyCode == 36 { // Return / Enter
+            viewModel.sendKeyboardInput(key: "ENTER", type: "SPECIAL")
+        } else if event.keyCode == 49 { // Space
+            viewModel.sendKeyboardInput(key: " ", type: "STRING")
+        } else if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
+            viewModel.sendKeyboardInput(key: chars, type: "STRING")
         }
     }
 }

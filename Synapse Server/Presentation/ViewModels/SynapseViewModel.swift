@@ -10,6 +10,7 @@ import Combine
 import os.log
 import AppKit
 import UserNotifications
+import WidgetKit
 
 // Models for Telephony
 struct CallRecord: Identifiable {
@@ -36,6 +37,15 @@ struct NotificationRecord: Identifiable {
     let timestamp: Date
 }
 
+struct RemotePhoto: Identifiable {
+    let id: String
+    let name: String
+    let date: Date
+    let size: Int64
+    let thumbnail: NSImage?
+    var fullImage: NSImage?
+}
+
 @MainActor
 final class SynapseViewModel: ObservableObject {
     static let shared = SynapseViewModel()
@@ -46,6 +56,17 @@ final class SynapseViewModel: ObservableObject {
     let bonjourManager = BonjourManager()
     let tcpManager = TcpConnectionManager()
     let clipboardMonitor = ClipboardMonitor()
+    
+    @Published var isClipboardSyncEnabled: Bool = UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled") {
+        didSet {
+            UserDefaults.standard.set(isClipboardSyncEnabled, forKey: "isClipboardSyncEnabled")
+            if isClipboardSyncEnabled && connectionStatus == .connected {
+                startClipboardMonitoring()
+            } else {
+                clipboardMonitor.stopMonitoring()
+            }
+        }
+    }
 
     // State
     @Published var connectionStatus: ConnectionStatus = .disconnected
@@ -67,6 +88,9 @@ final class SynapseViewModel: ObservableObject {
     @Published var batteryLevel: Int? = nil
     @Published var screenFrame: NSImage? = nil
     @Published var isMirroring = false
+    @Published var remotePhotos: [RemotePhoto] = []
+    @Published var isRemoteAccessibilityEnabled = false
+    
     private var wasPlayingBeforeCall = false
 
 
@@ -75,17 +99,13 @@ final class SynapseViewModel: ObservableObject {
     private var heartbeatTimer: Timer?
     private let heartbeatTimeout: TimeInterval = 18 // seconds
 
-    /// Known (previously approved) device IDs for auto-accept.
-    private var knownDeviceIds: Set<String> {
-        get {
-            Set(UserDefaults.standard.stringArray(forKey: "knownDeviceIds") ?? [])
-        }
-        set {
-            UserDefaults.standard.set(Array(newValue), forKey: "knownDeviceIds")
-        }
-    }
+    // SettingsManager.shared is now used for known devices and settings
 
     init() {
+        // Pano senkronizasyonunun varsayılan olarak açık gelmesini sağla
+        UserDefaults.standard.register(defaults: ["isClipboardSyncEnabled": true])
+        self.isClipboardSyncEnabled = UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled")
+        
         generatePairingCode()
         observeIncomingPackets()
         setupClipboardCallback()
@@ -94,6 +114,7 @@ final class SynapseViewModel: ObservableObject {
         
         // Automatically start discovery/advertising on launch
         startDiscovery()
+        updateWidgetData() // Initial widget state
     }
 
     private func requestNotificationPermission() {
@@ -164,14 +185,53 @@ final class SynapseViewModel: ObservableObject {
         lastReceivedClipboard = nil
         errorMessage = "Bağlantı kesildi"
         
+        updateWidgetData() // Update widget to show disconnected
+        
         logger.info("♻️ Restarting discovery after disconnect...")
         startDiscovery()
+    }
+
+    private var lastWidgetUpdateHash: String = ""
+
+    private func updateWidgetData() {
+        let suiteName = "group.com.serkantkn.Synapse-Server"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            logger.error("❌ App Group not found: \(suiteName)")
+            return
+        }
+        
+        let name = connectedDeviceName ?? "Bağlı Değil"
+        let connected = (connectionStatus == .connected)
+        let battery = batteryLevel ?? 0
+        
+        // WidgetKit Rate Limit Koruması: Sadece veri değiştiyse güncelle
+        let currentHash = "\(name)_\(connected)_\(battery)"
+        if currentHash == lastWidgetUpdateHash {
+            return // Aynı veri, widget'ı tekrar tetiklemeye gerek yok
+        }
+        lastWidgetUpdateHash = currentHash
+        
+        defaults.set(name, forKey: "deviceName")
+        defaults.set(connected, forKey: "isConnected")
+        defaults.set(battery, forKey: "batteryLevel")
+        defaults.set(Date(), forKey: "lastUpdate")
+        
+        defaults.synchronize()
+        
+        // Minor delay to ensure disk write before widget refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            WidgetCenter.shared.reloadAllTimelines()
+            self.logger.info("📡 Widget sync: \(name), Connected: \(connected), Battery: \(battery)")
+        }
     }
 
     // MARK: - Discovery
 
     func startDiscovery() {
-        connectionStatus = .discovering
+        guard connectionStatus != .connected else { return }
+        if connectionStatus != .pairing {
+            connectionStatus = .discovering
+        }
 
         // Start listener and advertising
         bonjourManager.startAdvertising(port: serverPort)
@@ -285,13 +345,17 @@ final class SynapseViewModel: ObservableObject {
         showPairingRequest = false
         
         // Remember this device for auto-accept next time
-        var ids = knownDeviceIds
-        ids.insert(incoming.senderId)
-        knownDeviceIds = ids
-        logger.info("📝 Saved device \(incoming.senderId) as known")
+        let deviceName = incoming.payload["device_name"]?.value as? String ?? "Bilinmeyen Android Cihaz"
+        SettingsManager.shared.addKnownDevice(id: incoming.senderId, name: deviceName)
+        logger.info("📝 Saved device \(incoming.senderId) (\(deviceName)) as known")
         
         startClipboardMonitoring()
         startHeartbeatMonitoring()
+        
+        // Bağlantı kurulduğunda hemen duvar kağıdını iste
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.requestWallpaper()
+        }
     }
 
     func rejectPairing() {
@@ -319,7 +383,9 @@ final class SynapseViewModel: ObservableObject {
     }
 
     func startClipboardMonitoring() {
-        clipboardMonitor.startMonitoring()
+        if isClipboardSyncEnabled {
+            clipboardMonitor.startMonitoring()
+        }
     }
 
     private func sendClipboard(_ text: String) {
@@ -366,8 +432,11 @@ final class SynapseViewModel: ObservableObject {
             incomingPairingPacket = packet
             connectionStatus = .pairing
             
-            // Auto-accept if this device was previously approved
-            if knownDeviceIds.contains(packet.senderId) {
+            // Auto-accept if this device was previously approved AND requirePin is false
+            let isKnown = SettingsManager.shared.isDeviceKnown(id: packet.senderId)
+            let requirePin = SettingsManager.shared.requirePinForKnownDevices
+            
+            if isKnown && !requirePin {
                 logger.info("✅ Auto-accepting known device: \(packet.senderId)")
                 acceptPairing()
             } else {
@@ -387,6 +456,10 @@ final class SynapseViewModel: ObservableObject {
                     }
                 }
                 connectionStatus = .connected
+                if let deviceName = packet.payload["deviceName"]?.value as? String {
+                    self.connectedDeviceName = deviceName
+                }
+                updateWidgetData() // Update widget to show connected with name
                 startClipboardMonitoring()
                 startHeartbeatMonitoring()
             } else {
@@ -395,10 +468,14 @@ final class SynapseViewModel: ObservableObject {
             }
 
         case .CLIPBOARD_TRANSFER:
-            if let content = packet.payload["content"]?.value as? String {
-                lastReceivedClipboard = content
-                clipboardMonitor.setClipboardContent(content)
-                logger.info("Received clipboard: \(content.prefix(50))...")
+            if let content = packet.payload["text"]?.value as? String {
+                if isClipboardSyncEnabled {
+                    DispatchQueue.main.async {
+                        self.lastReceivedClipboard = content
+                        self.clipboardMonitor.setClipboardContent(content)
+                        self.logger.info("Received clipboard: \(content.prefix(50))...")
+                    }
+                }
             }
 
         case .HEARTBEAT:
@@ -407,6 +484,7 @@ final class SynapseViewModel: ObservableObject {
                 if let level = level {
                     DispatchQueue.main.async {
                         self.batteryLevel = level
+                        self.updateWidgetData() // Update widget with new battery
                     }
                     logger.info("🔋 Battery level updated: \(level)%")
                 }
@@ -421,6 +499,9 @@ final class SynapseViewModel: ObservableObject {
             
         case .WALLPAPER_TRANSFER:
             handleWallpaperTransfer(packet.payload)
+        
+        case .WALLPAPER_REQUEST:
+            break // Mac hiçbir zaman wallpaper isteği almaz, Android gönderir
             
         case .NOTIFICATION_EVENT:
             handleNotificationEvent(packet.payload)
@@ -435,6 +516,59 @@ final class SynapseViewModel: ObservableObject {
             if let command = packet.payload["command"]?.value as? String, command == "STOP" {
                 DispatchQueue.main.async { self.isMirroring = false }
             }
+            
+        case .FILE_TRANSFER:
+            break // Currently Mac -> Android only
+
+        case .PHOTO_LIBRARY_REQ, .PHOTO_DOWNLOAD_REQ:
+            break // Handled on Android
+
+        case .PHOTO_LIBRARY_RESP:
+            if let photosArray = packet.payload["photos"]?.value as? [[String: Any]] {
+                var loadedPhotos: [RemotePhoto] = []
+                for p in photosArray {
+                    guard let id = p["id"] as? String,
+                          let name = p["name"] as? String else {
+                        self.logger.warning("Skipping a photo due to missing id or name")
+                        continue 
+                    }
+                    
+                    let dateMs = (p["date"] as? Int).map { Int64($0) } ?? (p["date"] as? Int64) ?? 0
+                    let size = (p["size"] as? Int).map { Int64($0) } ?? (p["size"] as? Int64) ?? 0
+                    
+                    var thumbImage: NSImage? = nil
+                    if let thumbB64 = p["thumbnail"] as? String,
+                       let data = Data(base64Encoded: thumbB64) {
+                        thumbImage = NSImage(data: data)
+                    }
+                    
+                    let date = Date(timeIntervalSince1970: TimeInterval(dateMs) / 1000.0)
+                    loadedPhotos.append(RemotePhoto(id: id, name: name, date: date, size: size, thumbnail: thumbImage))
+                }
+                DispatchQueue.main.async {
+                    self.remotePhotos = loadedPhotos
+                }
+            }
+
+        case .PHOTO_DOWNLOAD_RESP:
+            if let id = packet.payload["photo_id"]?.value as? String,
+               let dataB64 = packet.payload["data"]?.value as? String,
+               let data = Data(base64Encoded: dataB64),
+               let image = NSImage(data: data) {
+                DispatchQueue.main.async {
+                    if let index = self.remotePhotos.firstIndex(where: { $0.id == id }) {
+                        self.remotePhotos[index].fullImage = image
+                        let opened = self.openInPreview(image: image, filename: self.remotePhotos[index].name)
+                        NotificationCenter.default.post(
+                            name: Notification.Name("PhotoDownloaded"),
+                            object: nil,
+                            userInfo: ["id": id, "openedInPreview": opened]
+                        )
+                    }
+                }
+            }
+        case .PHOTO_DELETE_REQ:
+            break // Handled on Android
         }
     }
 
@@ -454,6 +588,106 @@ final class SynapseViewModel: ObservableObject {
             screenFrame = nil
         }
     }
+
+    func sendKeyboardInput(key: String, type: String = "STRING") {
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: .REMOTE_INPUT,
+            senderId: "mac-server",
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: [
+                "action": AnyCodable("KEYBOARD"),
+                "key": AnyCodable(key),
+                "key_type": AnyCodable(type)
+            ]
+        )
+        tcpManager.send(packet: packet)
+    }
+
+    func sendFile(url: URL) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let data = try Data(contentsOf: url)
+                let base64String = data.base64EncodedString()
+                let packet = Packet(
+                    packetId: UUID().uuidString,
+                    type: .FILE_TRANSFER,
+                    senderId: "mac-server",
+                    timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+                    payload: [
+                        "file_name": AnyCodable(url.lastPathComponent),
+                        "file_size": AnyCodable(data.count),
+                        "file_data": AnyCodable(base64String)
+                    ]
+                )
+                self.tcpManager.send(packet: packet)
+                self.logger.info("Sent file \(url.lastPathComponent) (\(data.count) bytes) to Android.")
+            } catch {
+                self.logger.error("Failed to read file for transfer: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func requestPhotoLibrary() {
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: .PHOTO_LIBRARY_REQ,
+            senderId: "mac-server",
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: [:]
+        )
+        tcpManager.send(packet: packet)
+    }
+
+    func downloadFullPhoto(id: String) {
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: .PHOTO_DOWNLOAD_REQ,
+            senderId: "mac-server",
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: ["photo_id": AnyCodable(id)]
+        )
+        tcpManager.send(packet: packet)
+    }
+
+    func deletePhotoFromPhone(id: String) {
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: .PHOTO_DELETE_REQ,
+            senderId: "mac-server",
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: ["photo_id": AnyCodable(id)]
+        )
+        tcpManager.send(packet: packet)
+        
+        // Optimistically remove from remotePhotos local list
+        DispatchQueue.main.async {
+            self.remotePhotos.removeAll(where: { $0.id == id })
+        }
+    }
+
+    func openInPreview(image: NSImage, filename: String) -> Bool {
+        let tempDir = FileManager.default.temporaryDirectory
+        var finalFilename = filename
+        if !filename.lowercased().hasSuffix(".jpg") && !filename.lowercased().hasSuffix(".jpeg") {
+            finalFilename += ".jpg"
+        }
+        let fileUrl = tempDir.appendingPathComponent(finalFilename)
+        
+        if let tiff = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff),
+           let data = bitmap.representation(using: .jpeg, properties: [:]) {
+            do {
+                try data.write(to: fileUrl)
+                return NSWorkspace.shared.open(fileUrl)
+            } catch {
+                self.logger.error("Failed to write/open temp file in Preview: \(error.localizedDescription)")
+                return false
+            }
+        }
+        return false
+    }
+
 
     func sendRemoteInput(x: Double, y: Double, action: String) {
         let packet = Packet(
@@ -475,8 +709,11 @@ final class SynapseViewModel: ObservableObject {
               let data = Data(base64Encoded: base64String, options: .ignoreUnknownCharacters),
               let image = NSImage(data: data) else { return }
         
+        let isAcc = payload["accessibility_enabled"]?.value as? Bool ?? false
+        
         DispatchQueue.main.async {
             self.screenFrame = image
+            self.isRemoteAccessibilityEnabled = isAcc
         }
     }
 
@@ -507,25 +744,44 @@ final class SynapseViewModel: ObservableObject {
         if messages.count > 100 { messages.removeLast() }
     }
 
+    func requestWallpaper() {
+        guard case .connected = connectionStatus else { return }
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: .WALLPAPER_REQUEST,
+            senderId: bonjourManager.deviceId,
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: [:]
+        )
+        tcpManager.send(packet: packet)
+        logger.info("🖼️ Wallpaper requested from Android")
+    }
+
     private func handleWallpaperTransfer(_ payload: [String: AnyCodable]) {
+        logger.info("🖼️ handleWallpaperTransfer called. Payload keys: \(payload.keys.joined(separator: ", "))")
+        
         guard let base64String = payload["image"]?.value as? String else {
-            logger.error("❌ Wallpaper transfer failed: No image string in payload")
+            logger.error("❌ Wallpaper: 'image' key not found or wrong type. Keys: \(payload.keys.joined(separator: ", "))")
             return
         }
+        
+        logger.info("🖼️ Base64 string length: \(base64String.count)")
         
         guard let data = Data(base64Encoded: base64String, options: .ignoreUnknownCharacters) else {
-            logger.error("❌ Wallpaper transfer failed: Invalid Base64 data")
+            logger.error("❌ Wallpaper: Base64 decode failed (string len=\(base64String.count))")
             return
         }
         
+        logger.info("🖼️ Decoded data size: \(data.count) bytes")
+        
         guard let image = NSImage(data: data) else {
-            logger.error("❌ Wallpaper transfer failed: Could not create NSImage from data (\(data.count) bytes)")
+            logger.error("❌ Wallpaper: NSImage creation failed from \(data.count) bytes")
             return
         }
         
         DispatchQueue.main.async {
             self.deviceWallpaper = image
-            self.logger.info("🖼️ New device wallpaper received and updated (\(Int(image.size.width))x\(Int(image.size.height)))")
+            self.logger.info("🖼️ Wallpaper updated (\(Int(image.size.width))x\(Int(image.size.height)))")
         }
     }
 
@@ -583,6 +839,10 @@ final class SynapseViewModel: ObservableObject {
     }
 
     private func triggerNativeNotification(appName: String, title: String, body: String) {
+        if SettingsManager.shared.muteNotifications {
+            return
+        }
+
         let content = UNMutableNotificationContent()
         content.title = appName
         content.subtitle = title

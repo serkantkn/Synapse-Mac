@@ -16,10 +16,17 @@ enum PacketType: String, Codable {
     case CALL_COMMAND
     case SMS_COMMAND
     case WALLPAPER_TRANSFER
+    case WALLPAPER_REQUEST
     case NOTIFICATION_EVENT
     case SCREEN_STREAM_COMMAND
     case SCREEN_FRAME
     case REMOTE_INPUT
+    case FILE_TRANSFER
+    case PHOTO_LIBRARY_REQ
+    case PHOTO_LIBRARY_RESP
+    case PHOTO_DOWNLOAD_REQ
+    case PHOTO_DOWNLOAD_RESP
+    case PHOTO_DELETE_REQ
 }
 
 /// Base packet envelope — matches the Android JSON schema exactly.
