@@ -37,15 +37,47 @@ final class CryptoManager {
     }
 
     /// Performs ECDH key agreement and derives a shared AES-256 symmetric key.
-    func deriveSharedSecret(peerPublicKey: P256.KeyAgreement.PublicKey) throws {
+    /// `authSecret` (PIN bytes or the stored device token) is mixed into the HKDF info, so a peer
+    /// that doesn't know it ends up with a different key. Must match Android's CryptoManager.
+    func deriveSharedSecret(peerPublicKey: P256.KeyAgreement.PublicKey, authSecret: Data) throws {
         let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: peerPublicKey)
-        // Derive a symmetric key using HKDF
         self.sharedSymmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: Data("SynapseEncryption".utf8),
-            sharedInfo: Data(),
+            sharedInfo: Data("synapse-session-v1:".utf8) + authSecret,
             outputByteCount: 32 // 256-bit key
         )
+    }
+
+    // MARK: - Pairing authentication
+
+    static let authModePin = "pin"
+    static let authModeToken = "token"
+
+    /// Base64(HMAC-SHA256(secret, "synapse-auth-v1:<mode>:<initiatorPublicKeyBase64>")).
+    static func authProof(secret: Data, mode: String, publicKeyBase64: String) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: Data("synapse-auth-v1:\(mode):\(publicKeyBase64)".utf8),
+            using: SymmetricKey(data: secret)
+        )
+        return Data(mac).base64EncodedString()
+    }
+
+    /// Constant-time check of a proof received from the initiator.
+    static func verifyAuthProof(_ proofBase64: String, secret: Data, mode: String, publicKeyBase64: String) -> Bool {
+        guard let proof = Data(base64Encoded: proofBase64) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proof,
+            authenticating: Data("synapse-auth-v1:\(mode):\(publicKeyBase64)".utf8),
+            using: SymmetricKey(data: secret)
+        )
+    }
+
+    /// Long-term pairing token derived from the current (PIN-authenticated) session key.
+    func deriveDeviceToken() -> String? {
+        guard let key = sharedSymmetricKey else { return nil }
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("synapse-device-token-v1".utf8), using: key)
+        return Data(mac).base64EncodedString()
     }
 
     /// Clears the shared key and generates a fresh key pair for the next session.

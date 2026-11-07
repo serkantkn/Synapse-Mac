@@ -75,8 +75,6 @@ final class SynapseViewModel: ObservableObject {
     @Published var lastSentClipboard: String = ""
     @Published var lastReceivedClipboard: String?
     @Published var errorMessage: String?
-    @Published var showPairingRequest = false
-    @Published var incomingPairingPacket: Packet?
     @Published var qrCodeString: String = ""
 
     // Telephony State
@@ -257,6 +255,12 @@ final class SynapseViewModel: ObservableObject {
 
     func generatePairingCode() {
         pairingCode = String(format: "%06d", Int.random(in: 100000...999999))
+        #if DEBUG
+        // Automated tests can't read the PIN off the screen; Debug builds only.
+        if let fixed = ProcessInfo.processInfo.environment["SYNAPSE_DEBUG_PIN"], fixed.count == 6 {
+            pairingCode = fixed
+        }
+        #endif
         self.updateQRCodeString()
     }
 
@@ -264,7 +268,7 @@ final class SynapseViewModel: ObservableObject {
         let ip = getLocalIPAddress() ?? "0.0.0.0"
         let actualPort = bonjourManager.listenerPort ?? serverPort
         self.qrCodeString = "synapse://connect?ip=\(ip)&port=\(actualPort)&code=\(pairingCode)"
-        logger.info("📱 Generated QR String: \(self.qrCodeString) (port: \(actualPort))")
+        logger.info("📱 Generated pairing QR (port: \(actualPort))") // never log the PIN
     }
 
     private func getLocalIPAddress() -> String? {
@@ -290,44 +294,82 @@ final class SynapseViewModel: ObservableObject {
         return address
     }
 
-    func connectToDevice(host: String, port: UInt16) {
-        connectionStatus = .pairing
-        tcpManager.connect(to: host, port: port)
+    // MARK: - Handshake verification
+    //
+    // The phone proves it knows either the PIN shown here (first pairing) or the token both sides
+    // derived from that first session (reconnects). The same secret is mixed into the session key,
+    // so an impostor that copies a known device id still can't read or send encrypted packets.
 
-        // Send handshake
-        let packet = Packet(
-            packetId: UUID().uuidString,
-            type: .HANDSHAKE_REQUEST,
-            senderId: bonjourManager.deviceId,
-            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
-            payload: [
-                "device_name": AnyCodable(Host.current().localizedName ?? "Mac"),
-                "device_type": AnyCodable("macOS"),
-                "public_key": AnyCodable(tcpManager.cryptoManager.publicKeyBase64()),
-                "pairing_code": AnyCodable(pairingCode)
-            ]
-        )
+    private var failedPinAttempts = 0
+    private var pinLockoutUntil: Date?
+    private let maxPinAttempts = 5
+    private let pinLockoutDuration: TimeInterval = 30
 
-        // Small delay to allow connection to establish
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.tcpManager.send(packet: packet, encrypt: false)
+    private func handleHandshakeRequest(_ packet: Packet) {
+        guard connectionStatus != .connected else {
+            logger.warning("⛔ Handshake while already connected, ignoring")
+            return
+        }
+        guard let peerKey = packet.payload["public_key"]?.value as? String,
+              let mode = packet.payload["auth_mode"]?.value as? String,
+              let proof = packet.payload["auth_proof"]?.value as? String else {
+            rejectHandshake(code: "OUTDATED_CLIENT", reason: "Uygulama sürümü uyumsuz")
+            return
+        }
+
+        switch mode {
+        case CryptoManager.authModeToken:
+            if SettingsManager.shared.requirePinForKnownDevices {
+                rejectHandshake(code: "PIN_REQUIRED", reason: "PIN gerekli")
+                return
+            }
+            guard let tokenB64 = SettingsManager.shared.pairingToken(for: packet.senderId),
+                  let token = Data(base64Encoded: tokenB64),
+                  CryptoManager.verifyAuthProof(proof, secret: token, mode: mode, publicKeyBase64: peerKey) else {
+                logger.warning("⛔ Token check failed for \(packet.senderId)")
+                rejectHandshake(code: "UNKNOWN_DEVICE", reason: "Cihaz tanınmadı")
+                return
+            }
+            completePairing(packet, peerKey: peerKey, secret: token, isNewPairing: false)
+
+        case CryptoManager.authModePin:
+            if let until = pinLockoutUntil, until > Date() {
+                rejectHandshake(code: "BAD_PIN", reason: "Çok fazla hatalı deneme, biraz bekleyin")
+                return
+            }
+            let secret = Data(pairingCode.utf8)
+            guard CryptoManager.verifyAuthProof(proof, secret: secret, mode: mode, publicKeyBase64: peerKey) else {
+                failedPinAttempts += 1
+                logger.warning("⛔ Wrong PIN (\(self.failedPinAttempts)/\(self.maxPinAttempts))")
+                if failedPinAttempts >= maxPinAttempts {
+                    // Burn the PIN and pause PIN attempts so it can't be brute-forced.
+                    failedPinAttempts = 0
+                    pinLockoutUntil = Date().addingTimeInterval(pinLockoutDuration)
+                    generatePairingCode()
+                }
+                rejectHandshake(code: "BAD_PIN", reason: "PIN kodu hatalı")
+                return
+            }
+            failedPinAttempts = 0
+            completePairing(packet, peerKey: peerKey, secret: secret, isNewPairing: true)
+            generatePairingCode() // a PIN is single-use
+
+        default:
+            rejectHandshake(code: "OUTDATED_CLIENT", reason: "Desteklenmeyen doğrulama")
         }
     }
 
-    func acceptPairing() {
-        guard let incoming = incomingPairingPacket else { return }
-
-        // Extract peer public key and derive shared secret
-        if let publicKeyStr = incoming.payload["public_key"]?.value as? String {
-            do {
-                let peerKey = try tcpManager.cryptoManager.decodePeerPublicKey(publicKeyStr)
-                try tcpManager.cryptoManager.deriveSharedSecret(peerPublicKey: peerKey)
-            } catch {
-                logger.error("Key exchange failed: \(error.localizedDescription)")
-            }
+    private func completePairing(_ incoming: Packet, peerKey: String, secret: Data, isNewPairing: Bool) {
+        do {
+            let key = try tcpManager.cryptoManager.decodePeerPublicKey(peerKey)
+            try tcpManager.cryptoManager.deriveSharedSecret(peerPublicKey: key, authSecret: secret)
+        } catch {
+            logger.error("Key exchange failed: \(error.localizedDescription)")
+            rejectHandshake(code: "BAD_KEY", reason: "Anahtar değişimi başarısız")
+            return
         }
 
-        // Send acceptance with our public key
+        // Response stays plaintext (the phone needs our public key to derive the same session key).
         let response = Packet(
             packetId: UUID().uuidString,
             type: .HANDSHAKE_RESPONSE,
@@ -335,30 +377,33 @@ final class SynapseViewModel: ObservableObject {
             timestamp: Int64(Date().timeIntervalSince1970 * 1000),
             payload: [
                 "status": AnyCodable("ACCEPTED"),
-                "public_key": AnyCodable(tcpManager.cryptoManager.publicKeyBase64())
+                "public_key": AnyCodable(tcpManager.cryptoManager.publicKeyBase64()),
+                "device_name": AnyCodable(Host.current().localizedName ?? "Mac")
             ]
         )
         tcpManager.send(packet: response, encrypt: false)
 
-        connectedDeviceName = incoming.payload["device_name"]?.value as? String
-        connectionStatus = .connected
-        showPairingRequest = false
-        
-        // Remember this device for auto-accept next time
         let deviceName = incoming.payload["device_name"]?.value as? String ?? "Bilinmeyen Android Cihaz"
-        SettingsManager.shared.addKnownDevice(id: incoming.senderId, name: deviceName)
-        logger.info("📝 Saved device \(incoming.senderId) (\(deviceName)) as known")
-        
+        connectedDeviceName = deviceName
+        connectionStatus = .connected
+        errorMessage = nil
+
+        let token = isNewPairing ? tcpManager.cryptoManager.deriveDeviceToken() : nil
+        SettingsManager.shared.addKnownDevice(id: incoming.senderId, name: deviceName, token: token)
+        logger.info("✅ Paired with \(incoming.senderId) (\(isNewPairing ? "PIN" : "token"))")
+
+        updateWidgetData()
         startClipboardMonitoring()
         startHeartbeatMonitoring()
-        
+
         // Bağlantı kurulduğunda hemen duvar kağıdını iste
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.requestWallpaper()
         }
     }
 
-    func rejectPairing() {
+    private func rejectHandshake(code: String, reason: String) {
+        logger.warning("⛔ Handshake rejected: \(code)")
         let response = Packet(
             packetId: UUID().uuidString,
             type: .HANDSHAKE_RESPONSE,
@@ -366,12 +411,18 @@ final class SynapseViewModel: ObservableObject {
             timestamp: Int64(Date().timeIntervalSince1970 * 1000),
             payload: [
                 "status": AnyCodable("REJECTED"),
-                "reason": AnyCodable("Kullanıcı eşleşmeyi reddetti")
+                "reason_code": AnyCodable(code),
+                "reason": AnyCodable(reason)
             ]
         )
         tcpManager.send(packet: response, encrypt: false)
-        showPairingRequest = false
-        connectionStatus = .disconnected
+        errorMessage = reason
+        // Give the response a moment to flush, then free the slot for the next attempt.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.connectionStatus != .connected else { return }
+            self.tcpManager.disconnect()
+            self.connectionStatus = .discovering
+        }
     }
 
     // MARK: - Clipboard
@@ -410,7 +461,7 @@ final class SynapseViewModel: ObservableObject {
             ]
         )
         tcpManager.send(packet: packet)
-        logger.info("Sent clipboard: \(text.prefix(50))...")
+        logger.info("Sent clipboard (\(text.count) chars)")
     }
 
     // MARK: - Incoming Packet Handling
@@ -427,45 +478,18 @@ final class SynapseViewModel: ObservableObject {
 
     private func handlePacket(_ packet: Packet) {
         logger.info("📩 Received packet type: \(packet.type.rawValue)")
+        // Everything except the handshake requires an authenticated session.
+        if packet.type != .HANDSHAKE_REQUEST && packet.type != .HANDSHAKE_RESPONSE && connectionStatus != .connected {
+            logger.warning("⛔ Ignoring \(packet.type.rawValue): not connected")
+            return
+        }
         switch packet.type {
         case .HANDSHAKE_REQUEST:
-            incomingPairingPacket = packet
-            connectionStatus = .pairing
-            
-            // Auto-accept if this device was previously approved AND requirePin is false
-            let isKnown = SettingsManager.shared.isDeviceKnown(id: packet.senderId)
-            let requirePin = SettingsManager.shared.requirePinForKnownDevices
-            
-            if isKnown && !requirePin {
-                logger.info("✅ Auto-accepting known device: \(packet.senderId)")
-                acceptPairing()
-            } else {
-                showPairingRequest = true
-            }
+            handleHandshakeRequest(packet)
 
         case .HANDSHAKE_RESPONSE:
-            let status = packet.payload["status"]?.value as? String
-            if status == "ACCEPTED" {
-                // Complete key exchange
-                if let publicKeyStr = packet.payload["public_key"]?.value as? String {
-                    do {
-                        let peerKey = try tcpManager.cryptoManager.decodePeerPublicKey(publicKeyStr)
-                        try tcpManager.cryptoManager.deriveSharedSecret(peerPublicKey: peerKey)
-                    } catch {
-                        logger.error("Key exchange failed: \(error.localizedDescription)")
-                    }
-                }
-                connectionStatus = .connected
-                if let deviceName = (packet.payload["device_name"] ?? packet.payload["deviceName"])?.value as? String {
-                    self.connectedDeviceName = deviceName
-                }
-                updateWidgetData() // Update widget to show connected with name
-                startClipboardMonitoring()
-                startHeartbeatMonitoring()
-            } else {
-                connectionStatus = .disconnected
-                errorMessage = "Eşleşme reddedildi"
-            }
+            // The Mac only accepts sessions; it never sends a HANDSHAKE_REQUEST.
+            logger.warning("⛔ Unexpected HANDSHAKE_RESPONSE, ignoring")
 
         case .CLIPBOARD_TRANSFER:
             // Android sends "content" (same key the Mac sends); "text" kept for older clients.
@@ -474,7 +498,7 @@ final class SynapseViewModel: ObservableObject {
                     DispatchQueue.main.async {
                         self.lastReceivedClipboard = content
                         self.clipboardMonitor.setClipboardContent(content)
-                        self.logger.info("Received clipboard: \(content.prefix(50))...")
+                        self.logger.info("Received clipboard (\(content.count) chars)")
                     }
                 }
             }
@@ -836,7 +860,7 @@ final class SynapseViewModel: ObservableObject {
         // Trigger native macOS notification
         triggerNativeNotification(appName: appName, title: title, body: body)
         
-        logger.info("🔔 Notification from \(appName): \(title)")
+        logger.info("🔔 Notification from \(appName)")
     }
 
     private func triggerNativeNotification(appName: String, title: String, body: String) {

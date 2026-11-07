@@ -73,9 +73,6 @@ struct ContentView: View {
                 .frame(minWidth: 600, minHeight: 500)
         }
         .onAppear { viewModel.startDiscovery() }
-        .sheet(isPresented: $viewModel.showPairingRequest) {
-            PairingRequestView(viewModel: viewModel)
-        }
         .overlay {
             if viewModel.connectionStatus == .pairing {
                 PairingProgressOverlay()
@@ -705,63 +702,6 @@ struct GlassEmptyState: View {
             Text(title).font(.headline).foregroundStyle(.secondary)
             if let sub = subtitle { Text(sub).font(.subheadline).foregroundStyle(.secondary.opacity(0.6)) }
         }.padding(40)
-    }
-}
-
-// MARK: - Pairing Request View
-
-struct PairingRequestView: View {
-    @ObservedObject var viewModel: SynapseViewModel
-
-    var body: some View {
-        ZStack {
-            GlassBackground()
-
-            VStack(spacing: 32) {
-                VStack(spacing: 12) {
-                    Image(systemName: "iphone.badge.plus")
-                        .font(.system(size: 48)).foregroundStyle(.cyan)
-                    Text("Bağlantı İsteği")
-                        .font(.title.bold())
-                    Text("\(viewModel.incomingPairingPacket?.payload["device_name"]?.value as? String ?? "Android Cihaz") bağlanmak istiyor")
-                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
-                }
-
-                if let code = viewModel.incomingPairingPacket?.payload["pairing_code"]?.value as? String {
-                    VStack(spacing: 8) {
-                        Text("Cihazdaki PIN ile eşleştiğinden emin olun")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text(code)
-                            .font(.system(size: 44, weight: .bold, design: .monospaced))
-                            .tracking(10)
-                            .padding(.vertical, 12).padding(.horizontal, 24)
-                            .background(Color.white.opacity(0.05)).cornerRadius(12)
-                    }
-                }
-
-                HStack(spacing: 20) {
-                    Button(action: { viewModel.rejectPairing() }) {
-                        Text("Reddet")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.red.opacity(0.1)).cornerRadius(12)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.red)
-
-                    Button(action: { viewModel.acceptPairing() }) {
-                        Text("Onayla ve Bağlan")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(LinearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)).cornerRadius(12)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.white)
-                }
-            }
-            .padding(40)
-            .frame(width: 400, height: 450)
-        }
     }
 }
 

@@ -32,6 +32,9 @@ final class TcpConnectionManager: ObservableObject {
     /// Guard to prevent re-entrant disconnect calls.
     private var isDisconnecting = false
 
+    /// Frames in a row that failed to decrypt (reset on success and on a new connection).
+    private var consecutiveDecryptFailures = 0
+
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -77,6 +80,7 @@ final class TcpConnectionManager: ObservableObject {
         
         self.connection = conn
         self.isDisconnecting = false
+        self.consecutiveDecryptFailures = 0
 
         conn.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
@@ -88,6 +92,13 @@ final class TcpConnectionManager: ObservableObject {
                     self.lastPacketReceivedAt = Date()
                 }
                 self.receiveNextPacket()
+                // An unauthenticated peer must not hold the single connection slot forever.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self, weak conn] in
+                    guard let self = self, let conn = conn, self.connection === conn,
+                          self.cryptoManager.sharedSymmetricKey == nil else { return }
+                    self.logger.warning("⏱️ No completed handshake within 10s — dropping connection")
+                    self.handleConnectionLost()
+                }
             case .failed(let error):
                 self.logger.error("❌ Connection failed: \(error.localizedDescription)")
                 self.handleConnectionLost()
@@ -138,7 +149,12 @@ final class TcpConnectionManager: ObservableObject {
             let jsonData = try encoder.encode(packet)
 
             let dataToSend: Data
-            if encrypt, cryptoManager.sharedSymmetricKey != nil {
+            if encrypt {
+                // Never fall back to plaintext: without a session key the packet is not sent.
+                guard cryptoManager.sharedSymmetricKey != nil else {
+                    logger.warning("⛔ Not sending \(packet.type.rawValue): no secure session yet")
+                    return
+                }
                 dataToSend = try cryptoManager.encrypt(jsonData)
             } else {
                 dataToSend = jsonData
@@ -154,7 +170,7 @@ final class TcpConnectionManager: ObservableObject {
                 if let error = error {
                     self?.logger.error("❌ Send error: \(error.localizedDescription)")
                 } else {
-                    let icon = encrypt ? (self?.cryptoManager.sharedSymmetricKey != nil ? "🔒" : "🔓") : "🔓"
+                    let icon = encrypt ? "🔒" : "🔓"
                     self?.logger.info("\(icon) Sent: \(packet.type.rawValue) (\(dataToSend.count) bytes)")
                 }
             })
@@ -216,13 +232,22 @@ final class TcpConnectionManager: ObservableObject {
                 }
 
                 let jsonData: Data
+                let isEncrypted = self.cryptoManager.sharedSymmetricKey != nil
                 do {
-                    if self.cryptoManager.sharedSymmetricKey != nil {
+                    if isEncrypted {
                         jsonData = try self.cryptoManager.decrypt(payloadData)
                     } else {
                         jsonData = payloadData
                     }
+                    self.consecutiveDecryptFailures = 0
                 } catch {
+                    self.consecutiveDecryptFailures += 1
+                    if self.consecutiveDecryptFailures >= 3 {
+                        // A peer that keeps sending undecryptable frames doesn't share our key.
+                        self.logger.error("⛔ Repeated decrypt failures — dropping connection")
+                        self.handleConnectionLost()
+                        return
+                    }
                     // Never treat an undecryptable frame as plaintext: that would let anyone inject
                     // unencrypted packets into an encrypted session. Skip it (framing is still intact;
                     // e.g. a packet the peer sent before it received our handshake response).
@@ -237,6 +262,11 @@ final class TcpConnectionManager: ObservableObject {
                     
                     do {
                         let packet = try self.decoder.decode(Packet.self, from: jsonData)
+                        // Plaintext is only allowed for the handshake itself.
+                        if !isEncrypted && packet.type != .HANDSHAKE_REQUEST && packet.type != .HANDSHAKE_RESPONSE {
+                            self.logger.warning("⛔ Dropped plaintext \(packet.type.rawValue) before the secure session")
+                            return
+                        }
                         self.logger.info("⬇️ Received: \(packet.type.rawValue)")
                         self.lastReceivedPacket = packet
                     } catch {

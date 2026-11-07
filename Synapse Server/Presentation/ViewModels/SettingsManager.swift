@@ -8,6 +8,9 @@ struct KnownDevice: Codable, Identifiable, Hashable {
     var id: String // Same as senderId
     var name: String
     var lastConnectedAt: Date
+    /// Pairing token derived at the first PIN pairing; nil for entries saved by older versions,
+    /// which then have to pair with the PIN again.
+    var token: String? = nil
 }
 
 class SettingsManager: ObservableObject {
@@ -81,8 +84,14 @@ class SettingsManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    func addKnownDevice(id: String, name: String) {
-        knownDevices[id] = KnownDevice(id: id, name: name, lastConnectedAt: Date())
+    /// Saves/updates a device. A nil `token` keeps the one already stored.
+    func addKnownDevice(id: String, name: String, token: String? = nil) {
+        let existingToken = knownDevices[id]?.token
+        knownDevices[id] = KnownDevice(id: id, name: name, lastConnectedAt: Date(), token: token ?? existingToken)
+    }
+
+    func pairingToken(for id: String) -> String? {
+        return knownDevices[id]?.token
     }
 
     func removeKnownDevice(id: String) {
