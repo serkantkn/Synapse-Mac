@@ -8,8 +8,8 @@ struct KnownDevice: Codable, Identifiable, Hashable {
     var id: String // Same as senderId
     var name: String
     var lastConnectedAt: Date
-    /// Pairing token derived at the first PIN pairing; nil for entries saved by older versions,
-    /// which then have to pair with the PIN again.
+    /// Only read to migrate tokens saved by older builds; tokens now live in the Keychain
+    /// (see PairingTokenStore).
     var token: String? = nil
 }
 
@@ -47,8 +47,29 @@ class SettingsManager: ObservableObject {
         } else {
             self.launchAtLogin = UserDefaults.standard.bool(forKey: "launchAtLogin")
         }
-        
+
+        migrateLegacyTokens()
+        pruneOrphanTokens()
         setupSubscriptions()
+    }
+
+    /// Earlier builds kept tokens inside knownDevicesDict; move them to the Keychain.
+    private func migrateLegacyTokens() {
+        guard knownDevices.values.contains(where: { $0.token != nil }) else { return }
+        for (id, device) in knownDevices {
+            guard let token = device.token, PairingTokenStore.set(token, for: id) else { continue }
+            knownDevices[id]?.token = nil
+        }
+        if let encoded = try? JSONEncoder().encode(knownDevices) {
+            UserDefaults.standard.set(encoded, forKey: "knownDevicesDict")
+        }
+    }
+
+    /// Tokens whose device is no longer in the known list (e.g. prefs were reset) must not keep working.
+    private func pruneOrphanTokens() {
+        for id in PairingTokenStore.allDeviceIds() where knownDevices[id] == nil {
+            PairingTokenStore.remove(id)
+        }
     }
     
     private func setupSubscriptions() {
@@ -84,18 +105,20 @@ class SettingsManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Saves/updates a device. A nil `token` keeps the one already stored.
+    /// Saves/updates a device. A nil `token` keeps the one already stored (in the Keychain).
     func addKnownDevice(id: String, name: String, token: String? = nil) {
-        let existingToken = knownDevices[id]?.token
-        knownDevices[id] = KnownDevice(id: id, name: name, lastConnectedAt: Date(), token: token ?? existingToken)
+        if let token = token { PairingTokenStore.set(token, for: id) }
+        knownDevices[id] = KnownDevice(id: id, name: name, lastConnectedAt: Date())
     }
 
     func pairingToken(for id: String) -> String? {
-        return knownDevices[id]?.token
+        guard knownDevices[id] != nil else { return nil }
+        return PairingTokenStore.get(id)
     }
 
     func removeKnownDevice(id: String) {
         knownDevices.removeValue(forKey: id)
+        PairingTokenStore.remove(id)
     }
 
     func isDeviceKnown(id: String) -> Bool {
