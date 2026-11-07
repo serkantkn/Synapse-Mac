@@ -78,6 +78,8 @@ struct AnyCodable: Codable {
         switch value {
         case let intVal as Int:
             try container.encode(intVal)
+        case let int64Val as Int64:
+            try container.encode(int64Val)
         case let doubleVal as Double:
             try container.encode(doubleVal)
         case let boolVal as Bool:

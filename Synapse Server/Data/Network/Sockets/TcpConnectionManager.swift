@@ -40,8 +40,16 @@ final class TcpConnectionManager: ObservableObject {
     /// Accept incoming connections from the NWListener.
     func acceptConnections(from bonjourListener: NWListener) {
         bonjourListener.newConnectionHandler = { [weak self] newConnection in
-            self?.logger.info("📥 Incoming connection from \(String(describing: newConnection.endpoint))")
-            self?.setupConnection(newConnection)
+            guard let self = self else { newConnection.cancel(); return }
+            self.logger.info("📥 Incoming connection from \(String(describing: newConnection.endpoint))")
+            // One peer at a time: don't let a second LAN host silently replace the active session.
+            // A dead peer is dropped by the heartbeat timeout, which frees the slot.
+            if self.connection != nil && !self.isDisconnecting {
+                self.logger.warning("⚠️ Connection already active. Rejecting new one.")
+                newConnection.cancel()
+                return
+            }
+            self.setupConnection(newConnection)
         }
     }
 
@@ -176,17 +184,18 @@ final class TcpConnectionManager: ObservableObject {
                     self.logger.info("🔌 Remote side closed the connection")
                     self.handleConnectionLost()
                 } else {
-                    self.logger.error("Invalid header data — retrying...")
-                    self.receiveNextPacket()
+                    // Stream is out of sync; continuing would misread every later frame.
+                    self.logger.error("Invalid header data — dropping connection")
+                    self.handleConnectionLost()
                 }
                 return
             }
 
-            let length = headerData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let length = headerData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
 
-            guard length > 0, length < 10_000_000 else {
-                self.logger.error("Invalid packet length: \(length)")
-                self.receiveNextPacket()
+            guard length > 0, length <= 10_000_000 else {
+                self.logger.error("Invalid packet length: \(length) — dropping connection")
+                self.handleConnectionLost()
                 return
             }
 
@@ -200,14 +209,13 @@ final class TcpConnectionManager: ObservableObject {
                     return
                 }
 
-                guard let payloadData = payloadData else {
-                    self.logger.error("No payload data received")
-                    self.receiveNextPacket()
+                guard let payloadData = payloadData, payloadData.count == Int(length) else {
+                    self.logger.error("Incomplete payload — dropping connection")
+                    self.handleConnectionLost()
                     return
                 }
 
-                // Try to decrypt/decode, with plaintext fallback
-                var jsonData: Data
+                let jsonData: Data
                 do {
                     if self.cryptoManager.sharedSymmetricKey != nil {
                         jsonData = try self.cryptoManager.decrypt(payloadData)
@@ -215,9 +223,12 @@ final class TcpConnectionManager: ObservableObject {
                         jsonData = payloadData
                     }
                 } catch {
-                    // Decrypt failed — try plaintext fallback (e.g. heartbeat sent before key was ready)
-                    self.logger.warning("⚠️ Decrypt failed, trying plaintext fallback: \(error.localizedDescription)")
-                    jsonData = payloadData
+                    // Never treat an undecryptable frame as plaintext: that would let anyone inject
+                    // unencrypted packets into an encrypted session. Skip it (framing is still intact;
+                    // e.g. a packet the peer sent before it received our handshake response).
+                    self.logger.warning("⚠️ Decrypt failed, dropping frame: \(error.localizedDescription)")
+                    self.receiveNextPacket()
+                    return
                 }
 
                 DispatchQueue.main.async {

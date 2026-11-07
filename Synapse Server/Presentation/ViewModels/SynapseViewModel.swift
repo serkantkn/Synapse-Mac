@@ -418,7 +418,7 @@ final class SynapseViewModel: ObservableObject {
     private func observeIncomingPackets() {
         tcpManager.$lastReceivedPacket
             .compactMap { $0 }
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main) // RunLoop.main stalls while menus are open or the user scrolls
             .sink { [weak self] packet in
                 self?.handlePacket(packet)
             }
@@ -456,7 +456,7 @@ final class SynapseViewModel: ObservableObject {
                     }
                 }
                 connectionStatus = .connected
-                if let deviceName = packet.payload["deviceName"]?.value as? String {
+                if let deviceName = (packet.payload["device_name"] ?? packet.payload["deviceName"])?.value as? String {
                     self.connectedDeviceName = deviceName
                 }
                 updateWidgetData() // Update widget to show connected with name
@@ -468,7 +468,8 @@ final class SynapseViewModel: ObservableObject {
             }
 
         case .CLIPBOARD_TRANSFER:
-            if let content = packet.payload["text"]?.value as? String {
+            // Android sends "content" (same key the Mac sends); "text" kept for older clients.
+            if let content = (packet.payload["content"] ?? packet.payload["text"])?.value as? String {
                 if isClipboardSyncEnabled {
                     DispatchQueue.main.async {
                         self.lastReceivedClipboard = content
