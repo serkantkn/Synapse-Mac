@@ -15,7 +15,26 @@ final class TcpConnectionManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.serkantkn.synapse-server", category: "TCP")
 
-    private var connection: NWConnection?
+    /// All connection callbacks run here, one at a time. On a concurrent queue the state handler
+    /// and a receive error could both start the teardown at once and crash.
+    private let networkQueue = DispatchQueue(label: "com.serkantkn.synapse-server.tcp", qos: .userInitiated)
+
+    /// `connection` and `isDisconnecting` are also touched from the main thread (send, disconnect)
+    /// and the listener's queue.
+    private let stateLock = NSLock()
+    private var _connection: NWConnection?
+    private var _isDisconnecting = false
+
+    private var connection: NWConnection? {
+        get { stateLock.withLock { _connection } }
+        set { stateLock.withLock { _connection = newValue } }
+    }
+
+    /// Guard to prevent re-entrant disconnect calls.
+    private var isDisconnecting: Bool {
+        get { stateLock.withLock { _isDisconnecting } }
+        set { stateLock.withLock { _isDisconnecting = newValue } }
+    }
 
     let cryptoManager = CryptoManager()
 
@@ -29,8 +48,8 @@ final class TcpConnectionManager: ObservableObject {
     /// Callback fired when the connection is lost.
     var onDisconnected: (() -> Void)?
 
-    /// Guard to prevent re-entrant disconnect calls.
-    private var isDisconnecting = false
+    /// Frames in a row that failed to decrypt (reset on success and on a new connection).
+    private var consecutiveDecryptFailures = 0
 
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -40,8 +59,16 @@ final class TcpConnectionManager: ObservableObject {
     /// Accept incoming connections from the NWListener.
     func acceptConnections(from bonjourListener: NWListener) {
         bonjourListener.newConnectionHandler = { [weak self] newConnection in
-            self?.logger.info("📥 Incoming connection from \(String(describing: newConnection.endpoint))")
-            self?.setupConnection(newConnection)
+            guard let self = self else { newConnection.cancel(); return }
+            self.logger.info("📥 Incoming connection from \(String(describing: newConnection.endpoint))")
+            // One peer at a time: don't let a second LAN host silently replace the active session.
+            // A dead peer is dropped by the heartbeat timeout, which frees the slot.
+            if self.connection != nil && !self.isDisconnecting {
+                self.logger.warning("⚠️ Connection already active. Rejecting new one.")
+                newConnection.cancel()
+                return
+            }
+            self.setupConnection(newConnection)
         }
     }
 
@@ -69,6 +96,7 @@ final class TcpConnectionManager: ObservableObject {
         
         self.connection = conn
         self.isDisconnecting = false
+        self.consecutiveDecryptFailures = 0
 
         conn.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
@@ -80,6 +108,13 @@ final class TcpConnectionManager: ObservableObject {
                     self.lastPacketReceivedAt = Date()
                 }
                 self.receiveNextPacket()
+                // An unauthenticated peer must not hold the single connection slot forever.
+                self.networkQueue.asyncAfter(deadline: .now() + 10) { [weak self, weak conn] in
+                    guard let self = self, let conn = conn, self.connection === conn,
+                          self.cryptoManager.sharedSymmetricKey == nil else { return }
+                    self.logger.warning("⏱️ No completed handshake within 10s — dropping connection")
+                    self.handleConnectionLost()
+                }
             case .failed(let error):
                 self.logger.error("❌ Connection failed: \(error.localizedDescription)")
                 self.handleConnectionLost()
@@ -93,21 +128,31 @@ final class TcpConnectionManager: ObservableObject {
             }
         }
 
-        conn.start(queue: .global(qos: .userInitiated))
+        conn.start(queue: networkQueue)
+    }
+
+    /// Marks the session as closing and hands back its connection. Unless forced, it reports
+    /// `claimed: false` when another caller already started the teardown, so that runs once.
+    private func claimTeardown(force: Bool) -> (claimed: Bool, connection: NWConnection?) {
+        stateLock.withLock {
+            if _isDisconnecting && !force { return (false, nil) }
+            _isDisconnecting = true
+            let conn = _connection
+            _connection = nil
+            return (true, conn)
+        }
     }
 
     /// Called when the connection is lost unexpectedly.
     private func handleConnectionLost() {
-        // Guard against re-entrant calls
-        guard !isDisconnecting else { return }
-        isDisconnecting = true
-        
+        let (claimed, conn) = claimTeardown(force: false)
+        guard claimed else { return }
+
         logger.info("🔌 Handling connection loss...")
-        
+
         // Nullify the state handler to prevent further callbacks
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
-        connection = nil
+        conn?.stateUpdateHandler = nil
+        conn?.cancel()
         cryptoManager.resetSharedSecret()
         
         DispatchQueue.main.async { [weak self] in
@@ -130,7 +175,12 @@ final class TcpConnectionManager: ObservableObject {
             let jsonData = try encoder.encode(packet)
 
             let dataToSend: Data
-            if encrypt, cryptoManager.sharedSymmetricKey != nil {
+            if encrypt {
+                // Never fall back to plaintext: without a session key the packet is not sent.
+                guard cryptoManager.sharedSymmetricKey != nil else {
+                    logger.warning("⛔ Not sending \(packet.type.rawValue): no secure session yet")
+                    return
+                }
                 dataToSend = try cryptoManager.encrypt(jsonData)
             } else {
                 dataToSend = jsonData
@@ -146,7 +196,7 @@ final class TcpConnectionManager: ObservableObject {
                 if let error = error {
                     self?.logger.error("❌ Send error: \(error.localizedDescription)")
                 } else {
-                    let icon = encrypt ? (self?.cryptoManager.sharedSymmetricKey != nil ? "🔒" : "🔓") : "🔓"
+                    let icon = encrypt ? "🔒" : "🔓"
                     self?.logger.info("\(icon) Sent: \(packet.type.rawValue) (\(dataToSend.count) bytes)")
                 }
             })
@@ -176,17 +226,18 @@ final class TcpConnectionManager: ObservableObject {
                     self.logger.info("🔌 Remote side closed the connection")
                     self.handleConnectionLost()
                 } else {
-                    self.logger.error("Invalid header data — retrying...")
-                    self.receiveNextPacket()
+                    // Stream is out of sync; continuing would misread every later frame.
+                    self.logger.error("Invalid header data — dropping connection")
+                    self.handleConnectionLost()
                 }
                 return
             }
 
-            let length = headerData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let length = headerData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
 
-            guard length > 0, length < 10_000_000 else {
-                self.logger.error("Invalid packet length: \(length)")
-                self.receiveNextPacket()
+            guard length > 0, length <= 10_000_000 else {
+                self.logger.error("Invalid packet length: \(length) — dropping connection")
+                self.handleConnectionLost()
                 return
             }
 
@@ -200,24 +251,35 @@ final class TcpConnectionManager: ObservableObject {
                     return
                 }
 
-                guard let payloadData = payloadData else {
-                    self.logger.error("No payload data received")
-                    self.receiveNextPacket()
+                guard let payloadData = payloadData, payloadData.count == Int(length) else {
+                    self.logger.error("Incomplete payload — dropping connection")
+                    self.handleConnectionLost()
                     return
                 }
 
-                // Try to decrypt/decode, with plaintext fallback
-                var jsonData: Data
+                let jsonData: Data
+                let isEncrypted = self.cryptoManager.sharedSymmetricKey != nil
                 do {
-                    if self.cryptoManager.sharedSymmetricKey != nil {
+                    if isEncrypted {
                         jsonData = try self.cryptoManager.decrypt(payloadData)
                     } else {
                         jsonData = payloadData
                     }
+                    self.consecutiveDecryptFailures = 0
                 } catch {
-                    // Decrypt failed — try plaintext fallback (e.g. heartbeat sent before key was ready)
-                    self.logger.warning("⚠️ Decrypt failed, trying plaintext fallback: \(error.localizedDescription)")
-                    jsonData = payloadData
+                    self.consecutiveDecryptFailures += 1
+                    if self.consecutiveDecryptFailures >= 3 {
+                        // A peer that keeps sending undecryptable frames doesn't share our key.
+                        self.logger.error("⛔ Repeated decrypt failures — dropping connection")
+                        self.handleConnectionLost()
+                        return
+                    }
+                    // Never treat an undecryptable frame as plaintext: that would let anyone inject
+                    // unencrypted packets into an encrypted session. Skip it (framing is still intact;
+                    // e.g. a packet the peer sent before it received our handshake response).
+                    self.logger.warning("⚠️ Decrypt failed, dropping frame: \(error.localizedDescription)")
+                    self.receiveNextPacket()
+                    return
                 }
 
                 DispatchQueue.main.async {
@@ -226,6 +288,11 @@ final class TcpConnectionManager: ObservableObject {
                     
                     do {
                         let packet = try self.decoder.decode(Packet.self, from: jsonData)
+                        // Plaintext is only allowed for the handshake itself.
+                        if !isEncrypted && !packet.type.isHandshake {
+                            self.logger.warning("⛔ Dropped plaintext \(packet.type.rawValue) before the secure session")
+                            return
+                        }
                         self.logger.info("⬇️ Received: \(packet.type.rawValue)")
                         self.lastReceivedPacket = packet
                     } catch {
@@ -243,10 +310,9 @@ final class TcpConnectionManager: ObservableObject {
 
     /// Deliberately disconnect (user-initiated).
     func disconnect() {
-        isDisconnecting = true
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
-        connection = nil
+        let (_, conn) = claimTeardown(force: true)
+        conn?.stateUpdateHandler = nil
+        conn?.cancel()
         cryptoManager.resetSharedSecret()
         DispatchQueue.main.async {
             self.isConnected = false

@@ -12,13 +12,22 @@ import CryptoKit
 /// Manages the ECDH key exchange and AES-256-GCM encryption/decryption lifecycle.
 final class CryptoManager {
 
+    // The keys are read on the main thread (sending) while the network queue may reset them on
+    // a dropped connection. Unsynchronized, that race over-released the key and crashed the app.
+    private let lock = NSLock()
+    private var _privateKey: P256.KeyAgreement.PrivateKey
+    private var _sharedSymmetricKey: SymmetricKey?
+
     /// Our ECDH key pair.
-    private(set) var privateKey: P256.KeyAgreement.PrivateKey
-    var sharedSymmetricKey: SymmetricKey?
+    var privateKey: P256.KeyAgreement.PrivateKey { lock.withLock { _privateKey } }
+    var sharedSymmetricKey: SymmetricKey? {
+        get { lock.withLock { _sharedSymmetricKey } }
+        set { lock.withLock { _sharedSymmetricKey = newValue } }
+    }
 
     init() {
-        self.privateKey = P256.KeyAgreement.PrivateKey()
-        self.sharedSymmetricKey = nil
+        self._privateKey = P256.KeyAgreement.PrivateKey()
+        self._sharedSymmetricKey = nil
     }
 
     // MARK: - Key Exchange
@@ -37,21 +46,56 @@ final class CryptoManager {
     }
 
     /// Performs ECDH key agreement and derives a shared AES-256 symmetric key.
-    func deriveSharedSecret(peerPublicKey: P256.KeyAgreement.PublicKey) throws {
+    /// `authSecret` (the PAKE key or the stored device token) is mixed into the HKDF info, so a peer
+    /// that doesn't know it ends up with a different key. Must match Android's CryptoManager.
+    func deriveSharedSecret(peerPublicKey: P256.KeyAgreement.PublicKey, authSecret: Data) throws {
         let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: peerPublicKey)
-        // Derive a symmetric key using HKDF
         self.sharedSymmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: Data("SynapseEncryption".utf8),
-            sharedInfo: Data(),
+            sharedInfo: Data("synapse-session-v1:".utf8) + authSecret,
             outputByteCount: 32 // 256-bit key
         )
     }
 
+    // MARK: - Pairing authentication
+
+    /// Reconnect with the stored device token. First pairings use `Pake.authMode` instead.
+    static let authModeToken = "token"
+
+    /// Base64(HMAC-SHA256(secret, "synapse-auth-v1:<mode>:<initiatorPublicKeyBase64>")).
+    static func authProof(secret: Data, mode: String, publicKeyBase64: String) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(
+            for: Data("synapse-auth-v1:\(mode):\(publicKeyBase64)".utf8),
+            using: SymmetricKey(data: secret)
+        )
+        return Data(mac).base64EncodedString()
+    }
+
+    /// Constant-time check of a proof received from the initiator.
+    static func verifyAuthProof(_ proofBase64: String, secret: Data, mode: String, publicKeyBase64: String) -> Bool {
+        guard let proof = Data(base64Encoded: proofBase64) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proof,
+            authenticating: Data("synapse-auth-v1:\(mode):\(publicKeyBase64)".utf8),
+            using: SymmetricKey(data: secret)
+        )
+    }
+
+    /// Long-term pairing token derived from the current (PAKE-authenticated) session key.
+    func deriveDeviceToken() -> String? {
+        guard let key = sharedSymmetricKey else { return nil }
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("synapse-device-token-v1".utf8), using: key)
+        return Data(mac).base64EncodedString()
+    }
+
     /// Clears the shared key and generates a fresh key pair for the next session.
     func resetSharedSecret() {
-        sharedSymmetricKey = nil
-        privateKey = P256.KeyAgreement.PrivateKey()
+        let freshKey = P256.KeyAgreement.PrivateKey()
+        lock.withLock {
+            _sharedSymmetricKey = nil
+            _privateKey = freshKey
+        }
     }
 
     // MARK: - Encryption / Decryption

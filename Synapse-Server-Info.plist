@@ -8,5 +8,11 @@
 	</array>
 	<key>LSUIElement</key>
 	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Android cihazınızla yerel ağ üzerinden iletişim kurmak için ağ erişimi gereklidir.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

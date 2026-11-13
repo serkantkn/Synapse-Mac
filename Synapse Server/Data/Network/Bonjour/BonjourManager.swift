@@ -43,6 +43,20 @@ final class BonjourManager: ObservableObject {
 
     /// Start advertising this Mac as a Synapse server on the local network.
     func startAdvertising(port: UInt16) {
+        // Reuse a healthy listener: creating a second one on the same fixed port fails
+        // with "address in use" and leaves the accept handler on the dead listener.
+        if let existing = listener {
+            switch existing.state {
+            case .setup, .ready, .waiting:
+                logger.info("Listener already active, reusing it")
+                return
+            default:
+                existing.stateUpdateHandler = nil
+                existing.cancel()
+                listener = nil
+            }
+        }
+
         logger.info("Starting advertising on port \(port) with type '\(BonjourManager.serviceType)'")
 
         let params = NWParameters.tcp
@@ -105,6 +119,9 @@ final class BonjourManager: ObservableObject {
 
     /// Start browsing for other Synapse devices on the network.
     func startBrowsing() {
+        browser?.cancel()
+        browser = nil
+
         let params = NWParameters()
         params.includePeerToPeer = true
 
