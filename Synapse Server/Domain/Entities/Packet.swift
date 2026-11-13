@@ -9,6 +9,7 @@ import Foundation
 enum PacketType: String, Codable {
     case HANDSHAKE_REQUEST
     case HANDSHAKE_RESPONSE
+    case HANDSHAKE_CONFIRM   // PAKE key confirmation from the phone (see Pake.swift)
     case CLIPBOARD_TRANSFER
     case HEARTBEAT
     case CALL_EVENT
@@ -27,6 +28,19 @@ enum PacketType: String, Codable {
     case PHOTO_DOWNLOAD_REQ
     case PHOTO_DOWNLOAD_RESP
     case PHOTO_DELETE_REQ
+    // Companion features
+    case FIND_PHONE          // Mac -> phone: {action: START|STOP}
+    case NOTIFICATION_REPLY  // Mac -> phone: {key, text}
+    case MEDIA_STATE         // phone -> Mac: now playing
+    case MEDIA_COMMAND       // Mac -> phone: {action}
+    case LINK_SHARE          // both ways: {url}
+}
+
+extension PacketType {
+    /// The only packets allowed before the session is encrypted and authenticated.
+    var isHandshake: Bool {
+        self == .HANDSHAKE_REQUEST || self == .HANDSHAKE_RESPONSE || self == .HANDSHAKE_CONFIRM
+    }
 }
 
 /// Base packet envelope — matches the Android JSON schema exactly.

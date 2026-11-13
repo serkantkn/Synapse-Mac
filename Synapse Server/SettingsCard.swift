@@ -1,111 +1,103 @@
 import SwiftUI
 
+/// Settings page: general, security and known devices, each in its own glass card.
 struct SettingsCard: View {
     @ObservedObject var settings = SettingsManager.shared
 
     var body: some View {
-        GlassCard(cornerRadius: 24) {
-            VStack(alignment: .leading, spacing: 24) {
-                // Header
-                HStack(spacing: 12) {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.cyan)
-                    Text("Ayarlar")
-                        .font(.title2.bold())
-                }
-                .padding(.bottom, 8)
-
-                // Genel Ayarlar
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Genel").font(.subheadline.bold()).foregroundStyle(.secondary)
-                    
-                    Toggle(isOn: $settings.launchAtLogin) {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Otomatik Başlat")
-                                Text("Mac açıldığında arka planda otomatik olarak başlar.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: "macwindow.badge.plus").foregroundStyle(.blue)
-                        }
-                    }
-                    .toggleStyle(.switch).tint(.cyan)
-
-                    Toggle(isOn: $settings.muteNotifications) {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Bildirimleri Sessize Al")
-                                Text("Gelen çağrı ve mesaj bildirimlerini Mac'te gösterme.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: settings.muteNotifications ? "bell.slash.fill" : "bell.fill")
-                                .foregroundStyle(settings.muteNotifications ? .red : .green)
-                        }
-                    }
-                    .toggleStyle(.switch).tint(.cyan)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .modifier(GlassRowBackground(cornerRadius: 14))
-
-                // Güvenlik Ayarları
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Güvenlik").font(.subheadline.bold()).foregroundStyle(.secondary)
-                    
-                    Toggle(isOn: $settings.requirePinForKnownDevices) {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Otomatik Eşleşmeyi Kapat")
-                                Text("Bilinen cihazlar bile her bağlandığında PIN girmek zorunda kalsın.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: "lock.shield.fill").foregroundStyle(.orange)
-                        }
-                    }
-                    .toggleStyle(.switch).tint(.cyan)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .modifier(GlassRowBackground(cornerRadius: 14))
-
-                // Bilinen Cihazlar
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Bilinen Cihazlar").font(.subheadline.bold()).foregroundStyle(.secondary)
-                    
-                    if settings.knownDevices.isEmpty {
-                        GlassEmptyState(icon: "memorychip", title: "Cihaz Bulunamadı", subtitle: "Daha önce eşleştiğiniz cihazlar burada listelenir.")
-                    } else {
-                        ForEach(Array(settings.knownDevices.values), id: \.id) { device in
-                            HStack {
-                                Image(systemName: "candybarphone").font(.title3).foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(device.name).font(.headline)
-                                    Text("Son Bağlantı: \(device.lastConnectedAt.formatted(.dateTime.day().month().hour().minute()))")
-                                        .font(.caption2).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button(role: .destructive) {
-                                    withAnimation { settings.removeKnownDevice(id: device.id) }
-                                } label: {
-                                    Image(systemName: "trash.fill").foregroundStyle(.red.opacity(0.8))
-                                        .padding(8).background(Color.red.opacity(0.1), in: Circle())
-                                }.buttonStyle(.plain)
-                            }
-                            .padding(12)
-                            .modifier(GlassRowBackground(cornerRadius: 10))
-                        }
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .modifier(GlassRowBackground(cornerRadius: 14))
+        GlassCard {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionTitle("Genel")
+                SettingToggleRow(icon: "power", tint: .synapseBlue,
+                                 title: "Otomatik başlat",
+                                 detail: "Mac açıldığında arka planda başlar.",
+                                 isOn: $settings.launchAtLogin)
+                Divider().padding(.leading, 48)
+                SettingToggleRow(icon: settings.muteNotifications ? "bell.slash.fill" : "bell.fill",
+                                 tint: settings.muteNotifications ? .red : .orange,
+                                 title: "Bildirimleri sessize al",
+                                 detail: "Gelen çağrı ve mesajlar Mac'te bildirim olarak gösterilmez.",
+                                 isOn: $settings.muteNotifications)
             }
-            .padding(32).frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 32)
+
+        GlassCard {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionTitle("Güvenlik")
+                SettingToggleRow(icon: "lock.shield.fill", tint: .green,
+                                 title: "Her bağlantıda PIN iste",
+                                 detail: "Daha önce eşleşmiş cihazlar da her seferinde PIN girer.",
+                                 isOn: $settings.requirePinForKnownDevices)
+            }
+        }
+
+        GlassCard {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionTitle("Bilinen cihazlar")
+                if settings.knownDevices.isEmpty {
+                    EmptyStateView(icon: "smartphone", title: "Eşleşmiş cihaz yok",
+                                   subtitle: "Eşleştiğin telefonlar burada listelenir.")
+                } else {
+                    let devices = settings.knownDevices.values.sorted { $0.lastConnectedAt > $1.lastConnectedAt }
+                    ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
+                        if index > 0 { Divider().padding(.leading, 48) }
+                        HStack(spacing: 12) {
+                            IconTile(systemName: "smartphone", color: .synapseBlue, size: 36)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name).font(.body.weight(.semibold))
+                                Text("Son bağlantı: \(device.lastConnectedAt.formatted(.dateTime.day().month().hour().minute().locale(.turkish)))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                withAnimation(.smooth) { settings.removeKnownDevice(id: device.id) }
+                            } label: {
+                                Label("Unut", systemImage: "trash")
+                            }
+                            .glassButtonStyle()
+                            .foregroundStyle(.red)
+                            .help("Bu cihazı unut; bir sonraki bağlantıda PIN gerekir")
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct SectionTitle: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text.uppercased(with: .turkish))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.bottom, 6)
+    }
+}
+
+private struct SettingToggleRow: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    let detail: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            IconTile(systemName: icon, color: tint, size: 36)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body.weight(.medium))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            Toggle(title, isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.vertical, 8)
     }
 }

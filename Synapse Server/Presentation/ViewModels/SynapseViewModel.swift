@@ -35,7 +35,24 @@ struct NotificationRecord: Identifiable {
     let icon: NSImage?
     let packageName: String
     let timestamp: Date
+    /// Android notification key; used to answer the notification from the Mac.
+    var key: String = ""
+    var canReply: Bool = false
 }
+
+/// What is playing on the phone right now.
+struct PhoneMediaState: Equatable {
+    var title: String
+    var artist: String
+    var album: String
+    var appName: String
+    var isPlaying: Bool
+    var volume: Int
+    var maxVolume: Int
+    var art: NSImage?
+}
+
+enum ReplyStatus: Equatable { case sending, sent, failed }
 
 struct RemotePhoto: Identifiable {
     let id: String
@@ -88,6 +105,18 @@ final class SynapseViewModel: ObservableObject {
     @Published var isMirroring = false
     @Published var remotePhotos: [RemotePhoto] = []
     @Published var isRemoteAccessibilityEnabled = false
+
+    // Companion features
+    @Published var media: PhoneMediaState? = nil
+    @Published var isFindingPhone = false
+    @Published var replyStatus: [String: ReplyStatus] = [:]
+    @Published var transferMessage: String? = nil
+    private var findPhoneResetWork: DispatchWorkItem?
+    private var transferMessageWork: DispatchWorkItem?
+    private lazy var notificationDelegate = NotificationActionHandler(viewModel: self)
+
+    /// Frames are capped at 10 MB and files travel base64-encoded and encrypted inside one frame.
+    static let maxFileSize = 7_000_000
     
     private var wasPlayingBeforeCall = false
 
@@ -109,18 +138,64 @@ final class SynapseViewModel: ObservableObject {
         setupClipboardCallback()
         setupDisconnectCallback()
         requestNotificationPermission()
+        notificationDelegate.register()
         
+        #if DEBUG
+        // UI screenshots without a phone. Skips discovery so a real phone can't connect meanwhile.
+        if let demo = ProcessInfo.processInfo.environment["SYNAPSE_DEBUG_DEMO"] {
+            loadDemoSession(withData: demo != "empty")
+            return
+        }
+        #endif
+
         // Automatically start discovery/advertising on launch
         startDiscovery()
         updateWidgetData() // Initial widget state
     }
+
+    #if DEBUG
+    /// Fake session for UI screenshots: "SYNAPSE_DEBUG_DEMO=1" (with data), "=empty" or "=pairing".
+    private func loadDemoSession(withData: Bool) {
+        if ProcessInfo.processInfo.environment["SYNAPSE_DEBUG_DEMO"] == "pairing" {
+            connectionStatus = .discovering
+            return
+        }
+        connectedDeviceName = "Galaxy S24 FE"
+        batteryLevel = 82
+        connectionStatus = .connected
+        guard withData else { return }
+        let now = Date()
+        calls = [
+            CallRecord(number: "+90 532 418 22 10", state: "RINGING", timestamp: now.addingTimeInterval(-120)),
+            CallRecord(number: "+90 541 220 19 87", state: "IDLE", timestamp: now.addingTimeInterval(-3_600))
+        ]
+        messages = [
+            SmsRecord(sender: "Ayşe Yılmaz", body: "Akşam 8 gibi orada olurum, masayı ayırttım.", timestamp: now.addingTimeInterval(-300)),
+            SmsRecord(sender: "+90 850 222 00 00", body: "Kargonuz bugün teslim edilecek. Takip no: TR4821", timestamp: now.addingTimeInterval(-7_200))
+        ]
+        var whatsapp = NotificationRecord(appName: "WhatsApp", title: "Burak Demir", body: "Yarınki toplantı 10:00'a alındı, haberin olsun.",
+                                          icon: nil, packageName: "com.whatsapp", timestamp: now.addingTimeInterval(-60))
+        whatsapp.key = "demo-1"
+        whatsapp.canReply = true
+        notifications = [
+            whatsapp,
+            NotificationRecord(appName: "Takvim", title: "Diş hekimi", body: "Yarın 14:30 · Kadıköy",
+                               icon: nil, packageName: "com.google.android.calendar", timestamp: now.addingTimeInterval(-1_800))
+        ]
+        media = PhoneMediaState(title: "Gece Yolculuğu", artist: "Mavi Kuşlar", album: "Şehir Işıkları",
+                                appName: "Spotify", isPlaying: true, volume: 9, maxVolume: 15, art: nil)
+        lastSentClipboard = "https://synapse.example/davet/8f2c"
+        lastReceivedClipboard = "Kapı kodu: 4821#"
+        remotePhotos = []
+    }
+    #endif
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if granted {
                 self.logger.info("✅ Notification permission granted")
             } else if let error = error {
-                self.logger.error("Notification permission error: \(error.localizedDescription)")
+                self.logger.error("Notification permission error: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -131,6 +206,7 @@ final class SynapseViewModel: ObservableObject {
         tcpManager.onDisconnected = { [weak self] in
             guard let self = self else { return }
             self.logger.info("🔌 Connection lost detected by TCP manager")
+            self.pendingPake = nil // a PAKE exchange can't continue on another connection
             self.handleRemoteDisconnect()
         }
     }
@@ -181,6 +257,7 @@ final class SynapseViewModel: ObservableObject {
         connectionStatus = .disconnected
         connectedDeviceName = nil
         lastReceivedClipboard = nil
+        resetCompanionState()
         errorMessage = "Bağlantı kesildi"
         
         updateWidgetData() // Update widget to show disconnected
@@ -254,6 +331,7 @@ final class SynapseViewModel: ObservableObject {
     // MARK: - Pairing
 
     func generatePairingCode() {
+        pendingPake = nil // an exchange started with the old PIN must not complete
         pairingCode = String(format: "%06d", Int.random(in: 100000...999999))
         #if DEBUG
         // Automated tests can't read the PIN off the screen; Debug builds only.
@@ -296,14 +374,24 @@ final class SynapseViewModel: ObservableObject {
 
     // MARK: - Handshake verification
     //
-    // The phone proves it knows either the PIN shown here (first pairing) or the token both sides
-    // derived from that first session (reconnects). The same secret is mixed into the session key,
-    // so an impostor that copies a known device id still can't read or send encrypted packets.
+    // First pairing runs a PAKE on the PIN shown here (Pake.swift), so the PIN can't be recovered
+    // from a captured exchange. Reconnects prove the token both sides derived from that first
+    // session. The PAKE key or the token is mixed into the session key, so an impostor that
+    // copies a known device id still can't read or send encrypted packets.
 
-    private var failedPinAttempts = 0
+    private var pinAttempts = 0
     private var pinLockoutUntil: Date?
     private let maxPinAttempts = 5
     private let pinLockoutDuration: TimeInterval = 30
+
+    /// A PAKE exchange waiting for the phone's confirmation (message 3).
+    private struct PendingPake {
+        let request: Packet
+        let peerKey: String
+        let responderKey: String
+        let key: Data
+    }
+    private var pendingPake: PendingPake?
 
     private func handleHandshakeRequest(_ packet: Packet) {
         guard connectionStatus != .connected else {
@@ -311,11 +399,11 @@ final class SynapseViewModel: ObservableObject {
             return
         }
         guard let peerKey = packet.payload["public_key"]?.value as? String,
-              let mode = packet.payload["auth_mode"]?.value as? String,
-              let proof = packet.payload["auth_proof"]?.value as? String else {
+              let mode = packet.payload["auth_mode"]?.value as? String else {
             rejectHandshake(code: "OUTDATED_CLIENT", reason: "Uygulama sürümü uyumsuz")
             return
         }
+        pendingPake = nil
 
         switch mode {
         case CryptoManager.authModeToken:
@@ -323,7 +411,8 @@ final class SynapseViewModel: ObservableObject {
                 rejectHandshake(code: "PIN_REQUIRED", reason: "PIN gerekli")
                 return
             }
-            guard let tokenB64 = SettingsManager.shared.pairingToken(for: packet.senderId),
+            guard let proof = packet.payload["auth_proof"]?.value as? String,
+                  let tokenB64 = SettingsManager.shared.pairingToken(for: packet.senderId),
                   let token = Data(base64Encoded: tokenB64),
                   CryptoManager.verifyAuthProof(proof, secret: token, mode: mode, publicKeyBase64: peerKey) else {
                 logger.warning("⛔ Token check failed for \(packet.senderId)")
@@ -332,31 +421,88 @@ final class SynapseViewModel: ObservableObject {
             }
             completePairing(packet, peerKey: peerKey, secret: token, isNewPairing: false)
 
-        case CryptoManager.authModePin:
-            if let until = pinLockoutUntil, until > Date() {
-                rejectHandshake(code: "BAD_PIN", reason: "Çok fazla hatalı deneme, biraz bekleyin")
-                return
-            }
-            let secret = Data(pairingCode.utf8)
-            guard CryptoManager.verifyAuthProof(proof, secret: secret, mode: mode, publicKeyBase64: peerKey) else {
-                failedPinAttempts += 1
-                logger.warning("⛔ Wrong PIN (\(self.failedPinAttempts)/\(self.maxPinAttempts))")
-                if failedPinAttempts >= maxPinAttempts {
-                    // Burn the PIN and pause PIN attempts so it can't be brute-forced.
-                    failedPinAttempts = 0
-                    pinLockoutUntil = Date().addingTimeInterval(pinLockoutDuration)
-                    generatePairingCode()
-                }
-                rejectHandshake(code: "BAD_PIN", reason: "PIN kodu hatalı")
-                return
-            }
-            failedPinAttempts = 0
-            completePairing(packet, peerKey: peerKey, secret: secret, isNewPairing: true)
-            generatePairingCode() // a PIN is single-use
+        case Pake.authMode:
+            startPake(packet, peerKey: peerKey)
 
         default:
+            // Includes the old "pin" mode, whose proof could be brute-forced offline.
             rejectHandshake(code: "OUTDATED_CLIENT", reason: "Desteklenmeyen doğrulama")
         }
+    }
+
+    /// Message 2: answer the phone's PAKE share with ours and our confirmation.
+    private func startPake(_ packet: Packet, peerKey: String) {
+        if let until = pinLockoutUntil, until > Date() {
+            rejectHandshake(code: "BAD_PIN", reason: "Çok fazla hatalı deneme, biraz bekleyin")
+            return
+        }
+        // Each exchange is one PIN guess, so count it now: a guesser could otherwise drop the
+        // connection after checking our confirmation and never reach the failure path.
+        guard pinAttempts < maxPinAttempts else {
+            pinAttempts = 0
+            pinLockoutUntil = Date().addingTimeInterval(pinLockoutDuration)
+            generatePairingCode() // burn the PIN
+            rejectHandshake(code: "BAD_PIN", reason: "Çok fazla hatalı deneme, biraz bekleyin")
+            return
+        }
+        pinAttempts += 1
+
+        guard let shareB64 = packet.payload["pake_share"]?.value as? String,
+              let peerShare = Data(base64Encoded: shareB64) else {
+            rejectHandshake(code: "OUTDATED_CLIENT", reason: "Uygulama sürümü uyumsuz")
+            return
+        }
+        let responderKey = tcpManager.cryptoManager.publicKeyBase64()
+        let party: Pake.Party
+        let key: Data
+        do {
+            party = try Pake.Party(role: .responder, pin: pairingCode, initiatorKey: peerKey)
+            key = try party.sharedKey(peerShare: peerShare, responderKey: responderKey)
+        } catch {
+            logger.error("PAKE failed: \(error.localizedDescription)")
+            rejectHandshake(code: "BAD_KEY", reason: "Anahtar değişimi başarısız")
+            return
+        }
+        pendingPake = PendingPake(request: packet, peerKey: peerKey, responderKey: responderKey, key: key)
+
+        let challenge = Packet(
+            packetId: UUID().uuidString,
+            type: .HANDSHAKE_RESPONSE,
+            senderId: bonjourManager.deviceId,
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: [
+                "status": AnyCodable("CHALLENGE"),
+                "public_key": AnyCodable(responderKey),
+                "pake_share": AnyCodable(party.share.base64EncodedString()),
+                "pake_confirm": AnyCodable(Pake.confirmation(key: key, role: .responder).base64EncodedString())
+            ]
+        )
+        tcpManager.send(packet: challenge, encrypt: false)
+    }
+
+    /// Message 3: the phone's confirmation shows it used the same PIN.
+    private func handleHandshakeConfirm(_ packet: Packet) {
+        guard connectionStatus != .connected,
+              let pending = pendingPake, pending.request.senderId == packet.senderId else {
+            logger.warning("⛔ Unexpected HANDSHAKE_CONFIRM, ignoring")
+            return
+        }
+        pendingPake = nil
+        guard let confirmB64 = packet.payload["pake_confirm"]?.value as? String,
+              let confirmation = Data(base64Encoded: confirmB64),
+              Pake.verifyConfirmation(confirmation, key: pending.key, role: .initiator) else {
+            logger.warning("⛔ Wrong PIN (\(self.pinAttempts)/\(self.maxPinAttempts))")
+            rejectHandshake(code: "BAD_PIN", reason: "PIN kodu hatalı")
+            return
+        }
+        // Our key pair must still be the one the PAKE transcript covered.
+        guard tcpManager.cryptoManager.publicKeyBase64() == pending.responderKey else {
+            rejectHandshake(code: "BAD_KEY", reason: "Anahtar değişimi başarısız")
+            return
+        }
+        pinAttempts = 0
+        completePairing(pending.request, peerKey: pending.peerKey, secret: pending.key, isNewPairing: true)
+        generatePairingCode() // a PIN is single-use
     }
 
     private func completePairing(_ incoming: Packet, peerKey: String, secret: Data, isNewPairing: Bool) {
@@ -479,13 +625,16 @@ final class SynapseViewModel: ObservableObject {
     private func handlePacket(_ packet: Packet) {
         logger.info("📩 Received packet type: \(packet.type.rawValue)")
         // Everything except the handshake requires an authenticated session.
-        if packet.type != .HANDSHAKE_REQUEST && packet.type != .HANDSHAKE_RESPONSE && connectionStatus != .connected {
+        if !packet.type.isHandshake && connectionStatus != .connected {
             logger.warning("⛔ Ignoring \(packet.type.rawValue): not connected")
             return
         }
         switch packet.type {
         case .HANDSHAKE_REQUEST:
             handleHandshakeRequest(packet)
+
+        case .HANDSHAKE_CONFIRM:
+            handleHandshakeConfirm(packet)
 
         case .HANDSHAKE_RESPONSE:
             // The Mac only accepts sessions; it never sends a HANDSHAKE_REQUEST.
@@ -594,6 +743,18 @@ final class SynapseViewModel: ObservableObject {
             }
         case .PHOTO_DELETE_REQ:
             break // Handled on Android
+
+        case .FIND_PHONE, .MEDIA_COMMAND:
+            break // Mac -> phone only
+
+        case .MEDIA_STATE:
+            handleMediaState(packet.payload)
+
+        case .NOTIFICATION_REPLY:
+            handleReplyResult(packet.payload)
+
+        case .LINK_SHARE:
+            handleIncomingLink(packet.payload)
         }
     }
 
@@ -630,9 +791,30 @@ final class SynapseViewModel: ObservableObject {
     }
 
     func sendFile(url: URL) {
+        guard case .connected = connectionStatus else {
+            showTransferMessage("Telefon bağlı değil")
+            return
+        }
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+        if values?.isDirectory == true {
+            showTransferMessage("Klasör gönderilemez, dosya seçin")
+            return
+        }
+        if let size = values?.fileSize, size > Self.maxFileSize {
+            showTransferMessage("\(url.lastPathComponent) çok büyük (en fazla 7 MB)")
+            return
+        }
+        let name = url.lastPathComponent
+        showTransferMessage("Gönderiliyor: \(name)", autoHide: false)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 let data = try Data(contentsOf: url)
+                guard data.count <= Self.maxFileSize else {
+                    Task { @MainActor in self.showTransferMessage("\(name) çok büyük (en fazla 7 MB)") }
+                    return
+                }
                 let base64String = data.base64EncodedString()
                 let packet = Packet(
                     packetId: UUID().uuidString,
@@ -647,8 +829,10 @@ final class SynapseViewModel: ObservableObject {
                 )
                 self.tcpManager.send(packet: packet)
                 self.logger.info("Sent file \(url.lastPathComponent) (\(data.count) bytes) to Android.")
+                Task { @MainActor in self.showTransferMessage("Telefona gönderildi: \(name)") }
             } catch {
                 self.logger.error("Failed to read file for transfer: \(error.localizedDescription)")
+                Task { @MainActor in self.showTransferMessage("\(name) okunamadı") }
             }
         }
     }
@@ -838,6 +1022,8 @@ final class SynapseViewModel: ObservableObject {
         let title = payload["title"]?.value as? String ?? ""
         let body = payload["text"]?.value as? String ?? ""
         let packageName = payload["package_name"]?.value as? String ?? ""
+        let key = payload["key"]?.value as? String ?? ""
+        let canReply = (payload["can_reply"]?.value as? Bool ?? false) && !key.isEmpty
         
         // Decode app icon
         var icon: NSImage? = nil
@@ -852,18 +1038,20 @@ final class SynapseViewModel: ObservableObject {
             body: body,
             icon: icon,
             packageName: packageName,
-            timestamp: Date()
+            timestamp: Date(),
+            key: key,
+            canReply: canReply
         )
         notifications.insert(record, at: 0)
         if notifications.count > 200 { notifications.removeLast() }
         
         // Trigger native macOS notification
-        triggerNativeNotification(appName: appName, title: title, body: body)
+        triggerNativeNotification(appName: appName, title: title, body: body, replyKey: canReply ? key : nil)
         
         logger.info("🔔 Notification from \(appName)")
     }
 
-    private func triggerNativeNotification(appName: String, title: String, body: String) {
+    private func triggerNativeNotification(appName: String, title: String, body: String, replyKey: String? = nil) {
         if SettingsManager.shared.muteNotifications {
             return
         }
@@ -873,6 +1061,10 @@ final class SynapseViewModel: ObservableObject {
         content.subtitle = title
         content.body = body
         content.sound = .default
+        if let replyKey = replyKey {
+            content.categoryIdentifier = NotificationActionHandler.replyCategory
+            content.userInfo = [NotificationActionHandler.keyInfo: replyKey]
+        }
         
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
@@ -942,6 +1134,169 @@ final class SynapseViewModel: ObservableObject {
         tcpManager.send(packet: packet)
     }
 
+    // MARK: - Companion features
+
+    private func sendToPhone(_ type: PacketType, _ payload: [String: Any] = [:]) {
+        guard case .connected = connectionStatus else { return }
+        let packet = Packet(
+            packetId: UUID().uuidString,
+            type: type,
+            senderId: bonjourManager.deviceId,
+            timestamp: Int64(Date().timeIntervalSince1970 * 1000),
+            payload: payload.mapValues { AnyCodable($0) }
+        )
+        tcpManager.send(packet: packet)
+    }
+
+    private func resetCompanionState() {
+        media = nil
+        isFindingPhone = false
+        findPhoneResetWork?.cancel()
+        replyStatus = [:]
+    }
+
+    /// Rings the phone (or stops it). The phone stops by itself after 30 s.
+    func toggleFindPhone() {
+        guard case .connected = connectionStatus else { return }
+        isFindingPhone.toggle()
+        sendToPhone(.FIND_PHONE, ["action": isFindingPhone ? "START" : "STOP"])
+        findPhoneResetWork?.cancel()
+        if isFindingPhone {
+            let work = DispatchWorkItem { [weak self] in self?.isFindingPhone = false }
+            findPhoneResetWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+        }
+    }
+
+    func sendMediaCommand(_ action: String) {
+        sendToPhone(.MEDIA_COMMAND, ["action": action])
+    }
+
+    private func handleMediaState(_ payload: [String: AnyCodable]) {
+        let hasSession = payload["has_session"]?.value as? Bool ?? false
+        guard hasSession else {
+            media = nil
+            return
+        }
+        func int(_ key: String) -> Int {
+            let v = payload[key]?.value
+            return (v as? Int) ?? (v as? Double).map(Int.init) ?? 0
+        }
+        // Art is only sent when the track changes; an empty string means "no art".
+        var art = media?.art
+        if let artB64 = payload["art"]?.value as? String {
+            art = artB64.isEmpty ? nil : Data(base64Encoded: artB64).flatMap(NSImage.init(data:))
+        }
+        logger.info("🎵 Media state from phone (playing: \(payload["is_playing"]?.value as? Bool ?? false))")
+        media = PhoneMediaState(
+            title: payload["title"]?.value as? String ?? "",
+            artist: payload["artist"]?.value as? String ?? "",
+            album: payload["album"]?.value as? String ?? "",
+            appName: payload["app_name"]?.value as? String ?? "",
+            isPlaying: payload["is_playing"]?.value as? Bool ?? false,
+            volume: int("volume"),
+            maxVolume: int("max_volume"),
+            art: art
+        )
+    }
+
+    /// Answers a phone notification (from the app's list or the macOS banner).
+    func replyToNotification(key: String, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !trimmed.isEmpty, case .connected = connectionStatus else { return }
+        replyStatus[key] = .sending
+        sendToPhone(.NOTIFICATION_REPLY, ["key": key, "text": trimmed])
+    }
+
+    private func handleReplyResult(_ payload: [String: AnyCodable]) {
+        guard let key = payload["key"]?.value as? String else { return }
+        let ok = (payload["status"]?.value as? String) == "SENT"
+        logger.info("💬 Notification reply \(ok ? "delivered" : "failed") on phone")
+        replyStatus[key] = ok ? .sent : .failed
+        if ok {
+            if let index = notifications.firstIndex(where: { $0.key == key }) {
+                notifications[index].canReply = false // the phone allows one reply per notification
+            }
+        } else {
+            triggerNativeNotification(appName: "Synapse", title: "Yanıt gönderilemedi", body: "Bildirim telefonda artık yok veya yanıtlanamıyor.")
+        }
+    }
+
+    private static func webURL(_ string: String) -> URL? {
+        guard string.count <= 4096,
+              let url = URL(string: string.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    /// The phone shared a link: open it in the default browser.
+    private func handleIncomingLink(_ payload: [String: AnyCodable]) {
+        guard let raw = payload["url"]?.value as? String, let url = Self.webURL(raw) else {
+            logger.warning("⛔ Ignoring non-web link from phone")
+            return
+        }
+        logger.info("🔗 Opening link from phone")
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Link from the Mac clipboard, if it holds one.
+    var clipboardLink: URL? {
+        NSPasteboard.general.string(forType: .string).flatMap(Self.webURL)
+    }
+
+    func sendLinkToPhone(_ string: String) {
+        guard let url = Self.webURL(string) else {
+            showTransferMessage("Geçerli bir http(s) linki değil")
+            return
+        }
+        sendToPhone(.LINK_SHARE, ["url": url.absoluteString])
+        showTransferMessage("Link telefona gönderildi")
+    }
+
+    func sendClipboardLinkToPhone() {
+        guard let url = clipboardLink else {
+            showTransferMessage("Panoda link yok")
+            return
+        }
+        sendLinkToPhone(url.absoluteString)
+    }
+
+    func pickAndSendFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Telefona Gönder"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+        panel.urls.forEach(sendFile(url:))
+    }
+
+    /// Drop handler shared by the main window and the menu bar popover.
+    func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter { $0.canLoadObject(ofClass: URL.self) }
+        guard !fileProviders.isEmpty else { return false }
+        for provider in fileProviders {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url = url else { return }
+                Task { @MainActor in
+                    if url.isFileURL { self.sendFile(url: url) } else { self.sendLinkToPhone(url.absoluteString) }
+                }
+            }
+        }
+        return true
+    }
+
+    func showTransferMessage(_ message: String, autoHide: Bool = true) {
+        transferMessage = message
+        transferMessageWork?.cancel()
+        guard autoHide else { return }
+        let work = DispatchWorkItem { [weak self] in self?.transferMessage = nil }
+        transferMessageWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+    }
+
     // MARK: - Disconnect
 
     func disconnect() {
@@ -951,6 +1306,7 @@ final class SynapseViewModel: ObservableObject {
         connectionStatus = .disconnected
         connectedDeviceName = nil
         lastReceivedClipboard = nil
+        resetCompanionState()
     }
 
     func clearError() {

@@ -15,7 +15,26 @@ final class TcpConnectionManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.serkantkn.synapse-server", category: "TCP")
 
-    private var connection: NWConnection?
+    /// All connection callbacks run here, one at a time. On a concurrent queue the state handler
+    /// and a receive error could both start the teardown at once and crash.
+    private let networkQueue = DispatchQueue(label: "com.serkantkn.synapse-server.tcp", qos: .userInitiated)
+
+    /// `connection` and `isDisconnecting` are also touched from the main thread (send, disconnect)
+    /// and the listener's queue.
+    private let stateLock = NSLock()
+    private var _connection: NWConnection?
+    private var _isDisconnecting = false
+
+    private var connection: NWConnection? {
+        get { stateLock.withLock { _connection } }
+        set { stateLock.withLock { _connection = newValue } }
+    }
+
+    /// Guard to prevent re-entrant disconnect calls.
+    private var isDisconnecting: Bool {
+        get { stateLock.withLock { _isDisconnecting } }
+        set { stateLock.withLock { _isDisconnecting = newValue } }
+    }
 
     let cryptoManager = CryptoManager()
 
@@ -28,9 +47,6 @@ final class TcpConnectionManager: ObservableObject {
 
     /// Callback fired when the connection is lost.
     var onDisconnected: (() -> Void)?
-
-    /// Guard to prevent re-entrant disconnect calls.
-    private var isDisconnecting = false
 
     /// Frames in a row that failed to decrypt (reset on success and on a new connection).
     private var consecutiveDecryptFailures = 0
@@ -93,7 +109,7 @@ final class TcpConnectionManager: ObservableObject {
                 }
                 self.receiveNextPacket()
                 // An unauthenticated peer must not hold the single connection slot forever.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self, weak conn] in
+                self.networkQueue.asyncAfter(deadline: .now() + 10) { [weak self, weak conn] in
                     guard let self = self, let conn = conn, self.connection === conn,
                           self.cryptoManager.sharedSymmetricKey == nil else { return }
                     self.logger.warning("⏱️ No completed handshake within 10s — dropping connection")
@@ -112,21 +128,31 @@ final class TcpConnectionManager: ObservableObject {
             }
         }
 
-        conn.start(queue: .global(qos: .userInitiated))
+        conn.start(queue: networkQueue)
+    }
+
+    /// Marks the session as closing and hands back its connection. Unless forced, it reports
+    /// `claimed: false` when another caller already started the teardown, so that runs once.
+    private func claimTeardown(force: Bool) -> (claimed: Bool, connection: NWConnection?) {
+        stateLock.withLock {
+            if _isDisconnecting && !force { return (false, nil) }
+            _isDisconnecting = true
+            let conn = _connection
+            _connection = nil
+            return (true, conn)
+        }
     }
 
     /// Called when the connection is lost unexpectedly.
     private func handleConnectionLost() {
-        // Guard against re-entrant calls
-        guard !isDisconnecting else { return }
-        isDisconnecting = true
-        
+        let (claimed, conn) = claimTeardown(force: false)
+        guard claimed else { return }
+
         logger.info("🔌 Handling connection loss...")
-        
+
         // Nullify the state handler to prevent further callbacks
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
-        connection = nil
+        conn?.stateUpdateHandler = nil
+        conn?.cancel()
         cryptoManager.resetSharedSecret()
         
         DispatchQueue.main.async { [weak self] in
@@ -263,7 +289,7 @@ final class TcpConnectionManager: ObservableObject {
                     do {
                         let packet = try self.decoder.decode(Packet.self, from: jsonData)
                         // Plaintext is only allowed for the handshake itself.
-                        if !isEncrypted && packet.type != .HANDSHAKE_REQUEST && packet.type != .HANDSHAKE_RESPONSE {
+                        if !isEncrypted && !packet.type.isHandshake {
                             self.logger.warning("⛔ Dropped plaintext \(packet.type.rawValue) before the secure session")
                             return
                         }
@@ -284,10 +310,9 @@ final class TcpConnectionManager: ObservableObject {
 
     /// Deliberately disconnect (user-initiated).
     func disconnect() {
-        isDisconnecting = true
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
-        connection = nil
+        let (_, conn) = claimTeardown(force: true)
+        conn?.stateUpdateHandler = nil
+        conn?.cancel()
         cryptoManager.resetSharedSecret()
         DispatchQueue.main.async {
             self.isConnected = false

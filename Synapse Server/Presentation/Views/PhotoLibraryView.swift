@@ -17,13 +17,13 @@ struct PhotoLibraryView: View {
     @State private var photoToDelete: RemotePhoto? = nil
     
     let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 16)
+        GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 14)
     ]
 
     var body: some View {
         ZStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 16) {
+                LazyVGrid(columns: columns, spacing: 14) {
                     ForEach(viewModel.remotePhotos) { photo in
                         ZStack(alignment: .center) {
                             PhotoCell(photo: photo)
@@ -54,8 +54,8 @@ struct PhotoLibraryView: View {
                             // Spinner inside the specific cell during download
                             if downloadingPhotoId == photo.id {
                                 ZStack {
-                                    Color.black.opacity(0.5)
-                                        .cornerRadius(12)
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .fill(.black.opacity(0.45))
                                     ProgressView()
                                         .controlSize(.small)
                                         .colorScheme(.dark)
@@ -64,21 +64,20 @@ struct PhotoLibraryView: View {
                         }
                     }
                 }
-                .padding()
+                .padding(.horizontal, 28)
+                .padding(.vertical, 24)
             }
             
             if viewModel.remotePhotos.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo.on.rectangle.angled")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.secondary)
-                    Text("Fotoğraf Bulunamadı")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Text("Bağlı cihazdan fotoğraflar yükleniyor...")
-                        .font(.subheadline)
-                        .foregroundStyle(.tertiary)
+                GlassCard {
+                    VStack(spacing: 4) {
+                        ProgressView().controlSize(.small)
+                        EmptyStateView(icon: "photo.on.rectangle.angled", title: "Fotoğraflar yükleniyor",
+                                       subtitle: "Telefondaki son fotoğraflar birazdan burada görünür.")
+                    }
                 }
+                .frame(maxWidth: 420)
+                .padding(28)
             }
             
             // Full Screen Fallback Overlay (If macOS Preview fails)
@@ -92,11 +91,14 @@ struct PhotoLibraryView: View {
                     HStack {
                         Spacer()
                         Button(action: { selectedPhoto = nil }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title)
-                                .foregroundStyle(.white.opacity(0.8))
+                            Image(systemName: "xmark")
+                                .font(.title3.weight(.semibold))
+                                .frame(width: 22, height: 22)
                         }
-                        .buttonStyle(.plain)
+                        .glassButtonStyle()
+                        .controlSize(.large)
+                        .keyboardShortcut(.cancelAction)
+                        .help("Kapat")
                         .padding()
                     }
                     
@@ -112,46 +114,27 @@ struct PhotoLibraryView: View {
                         // Control Panel below image
                         HStack(spacing: 20) {
                             Button(action: { saveImage(full, name: selected.name) }) {
-                                HStack {
-                                    Image(systemName: "square.and.arrow.down")
-                                    Text("Bilgisayara Kaydet")
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .modifier(GlassTintedBackground(cornerRadius: 8, tint: .blue))
+                                Label("Mac'e Kaydet", systemImage: "square.and.arrow.down")
                             }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.white)
-                            
+                            .glassButtonStyle(prominent: true)
+
                             Button(action: {
                                 let _ = viewModel.openInPreview(image: full, filename: selected.name)
                             }) {
-                                HStack {
-                                    Image(systemName: "eye")
-                                    Text("Tekrar Önizleme ile Aç")
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .modifier(GlassRowBackground(cornerRadius: 8))
+                                Label("Önizleme ile Aç", systemImage: "eye")
                             }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.white)
-                            
-                            Button(action: {
+                            .glassButtonStyle()
+
+                            Button(role: .destructive, action: {
                                 photoToDelete = selected
                                 showDeleteConfirmation = true
                             }) {
-                                HStack {
-                                    Image(systemName: "trash")
-                                    Text("Telefondan Sil")
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .modifier(GlassTintedBackground(cornerRadius: 8, tint: .red))
+                                Label("Telefondan Sil", systemImage: "trash")
                             }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.white)
+                            .glassButtonStyle()
+                            .foregroundStyle(.red)
                         }
+                        .controlSize(.large)
                         .padding(.bottom, 24)
                         
                     } else {
@@ -231,29 +214,36 @@ struct PhotoLibraryView: View {
 
 struct PhotoCell: View {
     let photo: RemotePhoto
-    
+    @State private var isHovered = false
+
     var body: some View {
-        VStack {
-            if let thumb = photo.thumbnail {
-                Image(nsImage: thumb)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 120, height: 120)
-                    .clipped()
-                    .cornerRadius(8)
-            } else {
-                Rectangle()
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: 120, height: 120)
-                    .cornerRadius(8)
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let thumb = photo.thumbnail {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.06))
+                        .overlay { Image(systemName: "photo").font(.title2).foregroundStyle(.tertiary) }
+                }
             }
-            
+            .frame(minWidth: 0, maxWidth: .infinity)
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(isHovered ? 0.3 : 0.12), radius: isHovered ? 12 : 6, y: isHovered ? 6 : 3)
+
             Text(photo.name)
                 .font(.caption)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .padding(.horizontal, 2)
         }
-        .padding(8)
-        .modifier(GlassRowBackground(cornerRadius: 12))
+        .scaleEffect(isHovered ? 1.03 : 1)
+        .animation(.smooth(duration: 0.2), value: isHovered)
+        .onHover { isHovered = $0 }
+        .contentShape(Rectangle())
     }
 }
