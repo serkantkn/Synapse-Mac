@@ -8,6 +8,8 @@ En yeni sürüm [**Releases**](https://github.com/serkantkn/Synapse-Mac/releases
 
 DMG'yi aç, Synapse'i Uygulamalar klasörüne sürükle. Uygulama henüz Apple onayından geçmediği için ilk açılışta macOS onu durdurur: Sistem Ayarları → Gizlilik ve Güvenlik'te en alttaki “Yine de Aç” düğmesine bas.
 
+Daha önce Synapse'in eski bir sürümünü kurduysan, macOS ilk açılışta Synapse'in başka bir uygulamanın verilerine erişmek istediğini sorabilir; **İzin Ver** de. Beta sürümünde masaüstü widget'ı yok.
+
 Telefon uygulaması: [serkantkn/Synapse-Android](https://github.com/serkantkn/Synapse-Android)
 
 ## Neler var
